@@ -14,8 +14,6 @@ jobs:
     name: Build Android APK
     runs-on: ubuntu-latest
 
-    
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -25,7 +23,11 @@ jobs:
         with:
           node-version: 20
 
-            - name: Create Expo application
+                - name: Create Expo application
+        run: |
+          mkdir -p signalpilot
+          cd signalpilot
+          npx create-expo-app@latest . --template blank-typescript
         run: |
           mkdir -p signalpilot
           cd signalpilot
