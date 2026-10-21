@@ -28,13 +28,6 @@ jobs:
           mkdir -p signalpilot
           cd signalpilot
           npx create-expo-app@latest . --template blank-typescript
-        run: |
-          mkdir -p signalpilot
-          cd signalpilot
-          npx create-expo-app@latest . --template blank-typescript
-        run: |
-          npx create-expo-app@latest . --template blank-typescript
-
       - name: Configure application
         run: |
                   cd signalpilot
