@@ -1,0 +1,253 @@
+name: Build SignalPilot Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: signalpilot/package-lock.json
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Create SignalPilot Android project
+        run: |
+          npx --yes create-expo-app@latest signalpilot --template blank-typescript
+
+      - name: Configure SignalPilot
+        working-directory: signalpilot
+        run: |
+          cat > app.json <<'EOF'
+          {
+            "expo": {
+              "name": "SignalPilot",
+              "slug": "signalpilot",
+              "version": "1.0.0",
+              "orientation": "portrait",
+              "userInterfaceStyle": "dark",
+              "android": {
+                "package": "com.signalpilot.trading",
+                "versionCode": 1
+              }
+            }
+          }
+          EOF
+
+          cat > App.tsx <<'EOF'
+          import React, { useState } from 'react';
+          import {
+            SafeAreaView,
+            ScrollView,
+            View,
+            Text,
+            TouchableOpacity,
+            TextInput,
+            StyleSheet
+          } from 'react-native';
+
+          const markets = [
+            'EURUSD','GBPUSD','USDJPY','USDCHF','USDCAD',
+            'AUDUSD','NZDUSD','EURGBP','EURJPY','EURCHF',
+            'EURCAD','EURAUD','EURNZD','GBPJPY','GBPCHF',
+            'GBPCAD','GBPAUD','GBPNZD','AUDJPY','AUDCAD',
+            'AUDCHF','AUDNZD','CADJPY','CADCHF','NZDJPY',
+            'NZDCAD','NZDCHF','CHFJPY','XAUUSD','NAS100',
+            'US30','BTCUSD','ETHUSD'
+          ];
+
+          export default function App() {
+            const [tab, setTab] = useState('Signals');
+            const [balance, setBalance] = useState('1000');
+            const [risk, setRisk] = useState(0.5);
+            const [search, setSearch] = useState('');
+
+            const riskAmount =
+              Math.max(0, Number(balance) || 0) * risk / 100;
+
+            const filtered = markets.filter(m =>
+              m.toLowerCase().includes(search.toLowerCase())
+            );
+
+            const card = (title: string, body: string) => (
+              <View style={s.card} key={title}>
+                <Text style={s.title}>{title}</Text>
+                <Text style={s.body}>{body}</Text>
+              </View>
+            );
+
+            return (
+              <SafeAreaView style={s.screen}>
+                <View style={s.header}>
+                  <Text style={s.brand}>SIGNAL<Text style={s.accent}>PILOT</Text></Text>
+                  <Text style={s.subtitle}>QUANTITATIVE MARKET ASSISTANT</Text>
+                </View>
+
+                <View style={s.nav}>
+                  {['Signals','Quant','Risk','Alerts'].map(t => (
+                    <TouchableOpacity
+                      key={t}
+                      onPress={() => setTab(t)}
+                      style={[s.navButton, tab === t && s.active]}
+                    >
+                      <Text style={s.navText}>{t}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+
+                <ScrollView contentContainerStyle={s.content}>
+                  {tab === 'Signals' && (
+                    <>
+                      {card('ACCOUNT BALANCE', '$' +
+                        (Number(balance) || 0).toLocaleString('en-US'))}
+                      <TextInput
+                        value={search}
+                        onChangeText={setSearch}
+                        placeholder="Search forex crosses, gold, crypto..."
+                        placeholderTextColor="#8290a5"
+                        style={s.input}
+                      />
+                      <Text style={s.section}>MARKET WATCHLIST</Text>
+                      {filtered.map(m => (
+                        <View style={s.row} key={m}>
+                          <View>
+                            <Text style={s.market}>{m}</Text>
+                            <Text style={s.muted}>Waiting for verified live data</Text>
+                          </View>
+                          <Text style={s.wait}>WAIT</Text>
+                        </View>
+                      ))}
+                    </>
+                  )}
+
+                  {tab === 'Quant' && (
+                    <>
+                      {card('HYBRID ANALYSIS',
+                        'Designed for technical indicators, quantitative scoring, multi-timeframe confirmation and market-regime filters.')}
+                      {card('SIGNAL STATUS',
+                        'WAIT — no live price feed is connected. No real-time trading signal is being generated.')}
+                      {card('VALIDATION',
+                        'A strategy must be tested against historical data, transaction costs and out-of-sample results before live use.')}
+                    </>
+                  )}
+
+                  {tab === 'Risk' && (
+                    <>
+                      <Text style={s.section}>RISK CALCULATOR</Text>
+                      <Text style={s.label}>Account balance (USD)</Text>
+                      <TextInput
+                        value={balance}
+                        onChangeText={setBalance}
+                        keyboardType="decimal-pad"
+                        style={s.input}
+                      />
+                      <Text style={s.label}>Risk per trade</Text>
+                      <View style={s.riskRow}>
+                        {[0.25,0.5,1].map(v => (
+                          <TouchableOpacity
+                            key={v}
+                            onPress={() => setRisk(v)}
+                            style={[s.riskButton, risk === v && s.active]}
+                          >
+                            <Text style={s.navText}>{v}%</Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                      {card('RISK BUDGET',
+                        '$' + riskAmount.toFixed(2) + ' per trade')}
+                      <Text style={s.muted}>
+                        This is a risk budget, not a guaranteed maximum loss.
+                        Position size must account for stop distance,
+                        pip value, leverage and trading costs.
+                      </Text>
+                    </>
+                  )}
+
+                  {tab === 'Alerts' && (
+                    <>
+                      {card('ALERTS',
+                        'Signal notifications are not active until a live-data service and notification backend are connected.')}
+                      {card('NEXT REQUIREMENT',
+                        'Connect a reliable market-data provider and a secure notification service.')}
+                    </>
+                  )}
+
+                  <Text style={s.footer}>
+                    SIGNALPILOT • MANUAL TRADING ONLY{"\n"}
+                    No guaranteed profits. Verify all decisions independently.
+                  </Text>
+                </ScrollView>
+              </SafeAreaView>
+            );
+          }
+
+          const s = StyleSheet.create({
+            screen: { flex: 1, backgroundColor: '#0b1220' },
+            header: { padding: 22, paddingBottom: 15 },
+            brand: { color: '#ffffff', fontSize: 27, fontWeight: '900' },
+            accent: { color: '#36d399' },
+            subtitle: { color: '#94a3b8', fontSize: 10, marginTop: 5, letterSpacing: 2 },
+            nav: { flexDirection: 'row', paddingHorizontal: 8, borderBottomWidth: 1, borderColor: '#263246' },
+            navButton: { flex: 1, padding: 12, alignItems: 'center' },
+            active: { backgroundColor: '#145344', borderRadius: 8 },
+            navText: { color: '#ffffff', fontSize: 12, fontWeight: '600' },
+            content: { padding: 16, paddingBottom: 35 },
+            card: { backgroundColor: '#141f30', padding: 17, borderRadius: 12, marginBottom: 13 },
+            title: { color: '#36d399', fontWeight: '800', fontSize: 12, marginBottom: 9 },
+            body: { color: '#e2e8f0', fontSize: 15, lineHeight: 23 },
+            section: { color: '#94a3b8', fontSize: 11, fontWeight: '800', marginTop: 12, marginBottom: 12 },
+            input: { backgroundColor: '#141f30', color: '#ffffff', borderRadius: 9, padding: 13, marginBottom: 14, borderWidth: 1, borderColor: '#263246' },
+            row: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#141f30', padding: 13, marginBottom: 7, borderRadius: 9 },
+            market: { color: '#ffffff', fontWeight: '700', fontSize: 14 },
+            muted: { color: '#94a3b8', fontSize: 11, lineHeight: 18, marginTop: 5 },
+            wait: { color: '#fbbf24', fontSize: 12, fontWeight: '900' },
+            label: { color: '#e2e8f0', marginBottom: 8, fontSize: 13 },
+            riskRow: { flexDirection: 'row', gap: 10, marginBottom: 15 },
+            riskButton: { flex: 1, padding: 13, backgroundColor: '#141f30', alignItems: 'center', borderRadius: 9 },
+            footer: { textAlign: 'center', color: '#64748b', fontSize: 10, lineHeight: 18, marginTop: 24 }
+          });
+          EOF
+
+      - name: Install dependencies
+        working-directory: signalpilot
+        run: npm install
+
+      - name: Generate native Android project
+        working-directory: signalpilot
+        run: npx expo prebuild --platform android --clean --no-install
+
+      - name: Build debug APK
+        working-directory: signalpilot/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Upload installable APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SignalPilot-Android-APK
+          path: signalpilot/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+      EOF
