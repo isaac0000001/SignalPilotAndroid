@@ -14,9 +14,7 @@ jobs:
     name: Build Android APK
     runs-on: ubuntu-latest
 
-    defaults:
-      run:
-        working-directory: signalpilot
+    
 
     steps:
       - name: Checkout repository
@@ -27,12 +25,17 @@ jobs:
         with:
           node-version: 20
 
-      - name: Create Expo application
+            - name: Create Expo application
+        run: |
+          mkdir -p signalpilot
+          cd signalpilot
+          npx create-expo-app@latest . --template blank-typescript
         run: |
           npx create-expo-app@latest . --template blank-typescript
 
       - name: Configure application
         run: |
+                  cd signalpilot
           cat > app.json <<'EOF'
           {
             "expo": {
