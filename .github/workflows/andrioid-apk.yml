@@ -25,6 +25,7 @@ jobs:
 
         -name: Create Expo application
         run: |
+             cd signalpilot 
           mkdir -p signalpilot
           cd signalpilot
           npx create-expo-app@latest . --template blank-typescript
