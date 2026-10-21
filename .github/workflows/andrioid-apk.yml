@@ -23,11 +23,9 @@ jobs:
         with:
           node-version: 20
 
-        -name: Create Expo application
+      - name: Create Expo application
         run: |
-          mkdir -p signalpilot
-          cd signalpilot
-          npx create-expo-app@latest . --template blank-typescript
+          npx create-expo-app@latest signalpilot --template blank-typescript --yes
       - name: Configure application
         run: |
               cd signalpilot
