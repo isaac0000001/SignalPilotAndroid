@@ -23,7 +23,7 @@ jobs:
         with:
           node-version: 20
 
-                - name: Create Expo application
+        -name: Create Expo application
         run: |
           mkdir -p signalpilot
           cd signalpilot
