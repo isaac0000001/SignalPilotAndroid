@@ -25,15 +25,13 @@ jobs:
 
         -name: Create Expo application
         run: |
-             cd signalpilot 
           mkdir -p signalpilot
           cd signalpilot
           npx create-expo-app@latest . --template blank-typescript
       - name: Configure application
         run: |
-                  cd signalpilot
-          cat > app.json <<'EOF'
-          {
+              cd signalpilot
+              cat > app.json <<'EOF{
             "expo": {
               "name": "SignalPilot Pro",
               "slug": "signalpilot-pro",
@@ -49,6 +47,7 @@ jobs:
 
       - name: Create SignalPilot Pro interface
         run: |
+             cd signalpilot
           cat > App.tsx <<'EOF'
           import React, { useState } from 'react';
           import {
