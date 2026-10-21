@@ -13,6 +13,7 @@ jobs:
   build:
     name: Build Android APK
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repository
@@ -23,13 +24,21 @@ jobs:
         with:
           node-version: 20
 
-      - name: Create Expo application
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Create Expo project
         run: |
-          npx create-expo-app@latest signalpilot --template blank-typescript --yes
-      - name: Configure application
+          npx --yes create-expo-app@latest signalpilot --template blank-typescript
+
+      - name: Configure Expo application
+        working-directory: signalpilot
         run: |
-              cd signalpilot
-              cat > app.json <<'EOF{
+          cat > app.json <<'EOF'
+          {
             "expo": {
               "name": "SignalPilot Pro",
               "slug": "signalpilot-pro",
@@ -44,53 +53,53 @@ jobs:
           EOF
 
       - name: Create SignalPilot Pro interface
+        working-directory: signalpilot
         run: |
-             cd signalpilot
           cat > App.tsx <<'EOF'
           import React, { useState } from 'react';
           import {
-            SafeAreaView, ScrollView, View, Text,
-            TouchableOpacity, TextInput, StyleSheet
+            SafeAreaView,
+            ScrollView,
+            View,
+            Text,
+            TextInput,
+            TouchableOpacity,
+            StyleSheet
           } from 'react-native';
 
           const markets = [
-            { symbol: 'EURUSD', price: '1.08420', change: '+0.24%', signal: 'BUY' },
-            { symbol: 'GBPUSD', price: '1.27150', change: '+0.18%', signal: 'BUY' },
-            { symbol: 'USDJPY', price: '149.820', change: '-0.12%', signal: 'WAIT' },
-            { symbol: 'EURGBP', price: '0.85240', change: '-0.08%', signal: 'WAIT' },
-            { symbol: 'AUDUSD', price: '0.65430', change: '+0.11%', signal: 'BUY' },
-            { symbol: 'USDCAD', price: '1.36210', change: '-0.06%', signal: 'WAIT' },
-            { symbol: 'XAUUSD', price: '2650.00', change: '+0.42%', signal: 'BUY' },
-            { symbol: 'NAS100', price: '20120.0', change: '+0.31%', signal: 'BUY' },
-            { symbol: 'US30', price: '42800.0', change: '-0.15%', signal: 'WAIT' },
-            { symbol: 'BTCUSD', price: '67500.0', change: '+1.20%', signal: 'BUY' },
-            { symbol: 'ETHUSD', price: '2600.00', change: '+0.70%', signal: 'BUY' },
+            { symbol: 'EURUSD', price: '1.08420', change: '+0.24%' },
+            { symbol: 'GBPUSD', price: '1.27150', change: '+0.18%' },
+            { symbol: 'USDJPY', price: '149.820', change: '-0.12%' },
+            { symbol: 'EURGBP', price: '0.85240', change: '-0.08%' },
+            { symbol: 'AUDUSD', price: '0.65430', change: '+0.11%' },
+            { symbol: 'USDCAD', price: '1.36210', change: '-0.06%' },
+            { symbol: 'NZDUSD', price: '0.61230', change: '+0.09%' },
+            { symbol: 'EURJPY', price: '162.450', change: '+0.14%' },
+            { symbol: 'GBPJPY', price: '190.620', change: '-0.10%' },
+            { symbol: 'XAUUSD', price: '2650.00', change: '+0.42%' },
+            { symbol: 'NAS100', price: '20120.0', change: '+0.31%' },
+            { symbol: 'US30', price: '42800.0', change: '-0.15%' },
+            { symbol: 'BTCUSD', price: '67500.0', change: '+1.20%' },
+            { symbol: 'ETHUSD', price: '2600.00', change: '+0.70%' }
           ];
 
           export default function App() {
             const [tab, setTab] = useState('Dashboard');
             const [balance, setBalance] = useState('1000');
             const [risk, setRisk] = useState('1');
-            const [stopLoss, setStopLoss] = useState('30');
+            const [stop, setStop] = useState('30');
 
-            const riskAmount =
-              Math.max(0, Number(balance) || 0) *
-              Math.max(0, Number(risk) || 0) / 100;
-
-            const stop = Math.max(0, Number(stopLoss) || 0);
-            const units = stop > 0 ? riskAmount / stop : 0;
+            const account = Math.max(0, Number(balance) || 0);
+            const riskPercent = Math.max(0, Number(risk) || 0);
+            const stopDistance = Math.max(0, Number(stop) || 0);
+            const riskAmount = account * riskPercent / 100;
+            const units = stopDistance > 0
+              ? riskAmount / stopDistance
+              : 0;
 
             const Card = ({ children }: any) => (
               <View style={styles.card}>{children}</View>
-            );
-
-            const Button = ({ title }: any) => (
-              <TouchableOpacity
-                style={[styles.tab, tab === title && styles.activeTab]}
-                onPress={() => setTab(title)}
-              >
-                <Text style={styles.tabText}>{title}</Text>
-              </TouchableOpacity>
             );
 
             return (
@@ -100,155 +109,185 @@ jobs:
                     <Text style={styles.brand}>SIGNALPILOT</Text>
                     <Text style={styles.subtitle}>PRO TRADING TERMINAL</Text>
                   </View>
-                  <View style={styles.badge}>
-                    <Text style={styles.badgeText}>DEMO</Text>
-                  </View>
+                  <Text style={styles.demo}>DEMO</Text>
                 </View>
 
                 <View style={styles.nav}>
-                  {['Dashboard', 'Markets', 'Risk', 'Alerts'].map(t =>
-                    <Button key={t} title={t} />
-                  )}
+                  {['Dashboard', 'Markets', 'Risk', 'Alerts'].map(item => (
+                    <TouchableOpacity
+                      key={item}
+                      style={[
+                        styles.navButton,
+                        tab === item && styles.navActive
+                      ]}
+                      onPress={() => setTab(item)}
+                    >
+                      <Text style={styles.navText}>{item}</Text>
+                    </TouchableOpacity>
+                  ))}
                 </View>
 
                 <ScrollView contentContainerStyle={styles.content}>
-                  {tab === 'Dashboard' && <>
-                    <Text style={styles.heading}>Trading dashboard</Text>
-                    <Text style={styles.muted}>
-                      Your personal FX, crypto and CFD workspace
-                    </Text>
-                    <Card>
-                      <Text style={styles.muted}>VIRTUAL ACCOUNT BALANCE</Text>
-                      <Text style={styles.balance}>
-                        ${Number(balance || 0).toLocaleString('en-US',
-                          { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                      </Text>
-                      <Text style={styles.green}>PAPER TRADING ACCOUNT</Text>
-                    </Card>
-                    <View style={styles.row}>
-                      <View style={styles.half}>
-                        <Card>
-                          <Text style={styles.muted}>RISK PER TRADE</Text>
-                          <Text style={styles.metric}>{risk}%</Text>
-                        </Card>
-                      </View>
-                      <View style={styles.half}>
-                        <Card>
-                          <Text style={styles.muted}>RISK AMOUNT</Text>
-                          <Text style={styles.metric}>
-                            ${riskAmount.toFixed(2)}
-                          </Text>
-                        </Card>
-                      </View>
-                    </View>
-                    <Text style={styles.section}>Market watch</Text>
-                    {markets.slice(0, 5).map(m => (
-                      <Card key={m.symbol}>
-                        <View style={styles.marketRow}>
-                          <View>
-                            <Text style={styles.symbol}>{m.symbol}</Text>
-                            <Text style={styles.muted}>DEMO PRICE</Text>
-                          </View>
-                          <View style={styles.right}>
-                            <Text style={styles.price}>{m.price}</Text>
-                            <Text style={styles.green}>{m.change}</Text>
-                          </View>
-                        </View>
-                      </Card>
-                    ))}
-                  </>}
-
-                  {tab === 'Markets' && <>
-                    <Text style={styles.heading}>Markets</Text>
-                    <Text style={styles.muted}>
-                      Illustrative prices — not live market data
-                    </Text>
-                    {markets.map(m => (
-                      <Card key={m.symbol}>
-                        <View style={styles.marketRow}>
-                          <View>
-                            <Text style={styles.symbol}>{m.symbol}</Text>
-                            <Text style={styles.muted}>{m.signal} · DEMO</Text>
-                          </View>
-                          <View style={styles.right}>
-                            <Text style={styles.price}>{m.price}</Text>
-                            <Text style={styles.green}>{m.change}</Text>
-                          </View>
-                        </View>
-                      </Card>
-                    ))}
-                  </>}
-
-                  {tab === 'Risk' && <>
-                    <Text style={styles.heading}>Risk calculator</Text>
-                    <Text style={styles.muted}>
-                      Estimate your maximum planned loss
-                    </Text>
-                    <Card>
-                      <Text style={styles.label}>Virtual account balance ($)</Text>
-                      <TextInput
-                        style={styles.input}
-                        value={balance}
-                        onChangeText={setBalance}
-                        keyboardType="decimal-pad"
-                        placeholder="1000"
-                        placeholderTextColor="#718096"
-                      />
-                      <Text style={styles.label}>Risk per trade (%)</Text>
-                      <TextInput
-                        style={styles.input}
-                        value={risk}
-                        onChangeText={setRisk}
-                        keyboardType="decimal-pad"
-                        placeholder="1"
-                        placeholderTextColor="#718096"
-                      />
-                      <Text style={styles.label}>Stop-loss distance (pips or points)</Text>
-                      <TextInput
-                        style={styles.input}
-                        value={stopLoss}
-                        onChangeText={setStopLoss}
-                        keyboardType="decimal-pad"
-                        placeholder="30"
-                        placeholderTextColor="#718096"
-                      />
-                      <Text style={styles.muted}>Maximum planned loss</Text>
-                      <Text style={styles.balance}>${riskAmount.toFixed(2)}</Text>
+                  {tab === 'Dashboard' && (
+                    <>
+                      <Text style={styles.heading}>Trading dashboard</Text>
                       <Text style={styles.muted}>
-                        Risk budget divided by stop distance: {units.toFixed(4)}
+                        Your personal FX, crypto and CFD workspace.
                       </Text>
+
+                      <Card>
+                        <Text style={styles.muted}>VIRTUAL BALANCE</Text>
+                        <Text style={styles.balance}>
+                          ${account.toLocaleString('en-US', {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2
+                          })}
+                        </Text>
+                        <Text style={styles.green}>PAPER TRADING</Text>
+                      </Card>
+
+                      <View style={styles.row}>
+                        <View style={styles.half}>
+                          <Card>
+                            <Text style={styles.muted}>RISK</Text>
+                            <Text style={styles.metric}>
+                              {riskPercent}%
+                            </Text>
+                          </Card>
+                        </View>
+                        <View style={styles.half}>
+                          <Card>
+                            <Text style={styles.muted}>RISK AMOUNT</Text>
+                            <Text style={styles.metric}>
+                              ${riskAmount.toFixed(2)}
+                            </Text>
+                          </Card>
+                        </View>
+                      </View>
+
+                      <Text style={styles.section}>Market watch</Text>
+                      {markets.slice(0, 5).map(m => (
+                        <Card key={m.symbol}>
+                          <View style={styles.marketRow}>
+                            <Text style={styles.symbol}>{m.symbol}</Text>
+                            <View style={styles.right}>
+                              <Text style={styles.price}>{m.price}</Text>
+                              <Text style={styles.green}>{m.change}</Text>
+                            </View>
+                          </View>
+                        </Card>
+                      ))}
+                    </>
+                  )}
+
+                  {tab === 'Markets' && (
+                    <>
+                      <Text style={styles.heading}>Markets</Text>
                       <Text style={styles.warning}>
-                        This is a simplified calculation, not a broker-ready lot
-                        size. Contract size, pip value, account currency and
-                        instrument specifications must be considered.
+                        Illustrative prices only. These are not live quotes.
                       </Text>
-                    </Card>
-                  </>}
+                      {markets.map(m => (
+                        <Card key={m.symbol}>
+                          <View style={styles.marketRow}>
+                            <View>
+                              <Text style={styles.symbol}>{m.symbol}</Text>
+                              <Text style={styles.muted}>DEMO DATA</Text>
+                            </View>
+                            <View style={styles.right}>
+                              <Text style={styles.price}>{m.price}</Text>
+                              <Text style={styles.green}>{m.change}</Text>
+                            </View>
+                          </View>
+                        </Card>
+                      ))}
+                    </>
+                  )}
 
-                  {tab === 'Alerts' && <>
-                    <Text style={styles.heading}>Signals & alerts</Text>
-                    <Card>
-                      <Text style={styles.symbol}>Analysis status</Text>
-                      <Text style={styles.muted}>
-                        The prices and signals in this prototype are illustrative.
-                        No live data provider or verified trading strategy is
-                        connected.
-                      </Text>
-                    </Card>
-                    <Card>
-                      <Text style={styles.symbol}>Next development stage</Text>
-                      <Text style={styles.muted}>
-                        Connect a market-data API, implement tested technical
-                        indicators, and add configurable price alerts.
-                      </Text>
-                    </Card>
-                  </>}
+                  {tab === 'Risk' && (
+                    <>
+                      <Text style={styles.heading}>Risk calculator</Text>
+                      <Card>
+                        <Text style={styles.label}>
+                          Account balance in USD
+                        </Text>
+                        <TextInput
+                          style={styles.input}
+                          value={balance}
+                          onChangeText={setBalance}
+                          keyboardType="decimal-pad"
+                          placeholder="1000"
+                          placeholderTextColor="#94a3b8"
+                        />
+
+                        <Text style={styles.label}>
+                          Risk per trade (%)
+                        </Text>
+                        <TextInput
+                          style={styles.input}
+                          value={risk}
+                          onChangeText={setRisk}
+                          keyboardType="decimal-pad"
+                          placeholder="1"
+                          placeholderTextColor="#94a3b8"
+                        />
+
+                        <Text style={styles.label}>
+                          Stop-loss distance in pips or points
+                        </Text>
+                        <TextInput
+                          style={styles.input}
+                          value={stop}
+                          onChangeText={setStop}
+                          keyboardType="decimal-pad"
+                          placeholder="30"
+                          placeholderTextColor="#94a3b8"
+                        />
+
+                        <Text style={styles.muted}>
+                          Maximum planned risk
+                        </Text>
+                        <Text style={styles.balance}>
+                          ${riskAmount.toFixed(2)}
+                        </Text>
+
+                        <Text style={styles.muted}>
+                          Risk amount divided by stop distance:
+                          {' '}{units.toFixed(4)}
+                        </Text>
+
+                        <Text style={styles.warning}>
+                          Simplified estimate only. Actual lot sizing depends
+                          on instrument specifications, contract size, pip
+                          value and account currency.
+                        </Text>
+                      </Card>
+                    </>
+                  )}
+
+                  {tab === 'Alerts' && (
+                    <>
+                      <Text style={styles.heading}>Signals and alerts</Text>
+                      <Card>
+                        <Text style={styles.symbol}>Connection status</Text>
+                        <Text style={styles.muted}>
+                          No live market-data provider is connected.
+                        </Text>
+                      </Card>
+                      <Card>
+                        <Text style={styles.symbol}>Next development stage</Text>
+                        <Text style={styles.muted}>
+                          Integrate a market-data API, calculate indicators
+                          from real candles, and configure price alerts.
+                        </Text>
+                      </Card>
+                    </>
+                  )}
 
                   <Text style={styles.footer}>
-                    SIGNALPILOT PRO · PERSONAL DEMO TERMINAL
+                    SIGNALPILOT PRO
                   </Text>
                   <Text style={styles.disclaimer}>
-                    Not financial advice. No live orders are placed.
+                    Demo application. No live orders are placed.
                   </Text>
                 </ScrollView>
               </SafeAreaView>
@@ -256,92 +295,180 @@ jobs:
           }
 
           const styles = StyleSheet.create({
-            safe: { flex: 1, backgroundColor: '#08111f' },
+            safe: {
+              flex: 1,
+              backgroundColor: '#08111f'
+            },
             header: {
-              padding: 20, flexDirection: 'row',
-              justifyContent: 'space-between', alignItems: 'center'
-            },
-            brand: {
-              color: '#67e8f9', fontSize: 23,
-              fontWeight: '900', letterSpacing: 2
-            },
-            subtitle: {
-              color: '#8294aa', fontSize: 10,
-              letterSpacing: 2, marginTop: 4
-            },
-            badge: {
-              borderWidth: 1, borderColor: '#fbbf24',
-              borderRadius: 7, padding: 8
-            },
-            badgeText: { color: '#fbbf24', fontWeight: 'bold' },
-            nav: {
-              flexDirection: 'row', justifyContent: 'space-around',
-              paddingVertical: 8, borderBottomWidth: 1,
-              borderBottomColor: '#1e2b3d'
-            },
-            tab: { padding: 8, borderRadius: 7 },
-            activeTab: { backgroundColor: '#164e63' },
-            tabText: { color: '#e2e8f0', fontSize: 12 },
-            content: { padding: 16, paddingBottom: 35 },
-            heading: {
-              color: '#f1f5f9', fontSize: 24,
-              fontWeight: 'bold', marginTop: 8
-            },
-            muted: { color: '#94a3b8', fontSize: 12, lineHeight: 19 },
-            card: {
-              backgroundColor: '#111d2d', borderWidth: 1,
-              borderColor: '#233247', borderRadius: 13,
-              padding: 16, marginTop: 12
-            },
-            balance: {
-              color: '#f8fafc', fontSize: 30,
-              fontWeight: 'bold', marginVertical: 8
-            },
-            green: { color: '#34d399', fontSize: 12, fontWeight: 'bold' },
-            row: { flexDirection: 'row', marginHorizontal: -5 },
-            half: { flex: 1, marginHorizontal: 5 },
-            metric: { color: '#f8fafc', fontSize: 23, fontWeight: 'bold', marginTop: 8 },
-            section: {
-              color: '#f1f5f9', fontSize: 18,
-              fontWeight: 'bold', marginTop: 24
-            },
-            marketRow: {
-              flexDirection: 'row', justifyContent: 'space-between',
+              padding: 20,
+              flexDirection: 'row',
+              justifyContent: 'space-between',
               alignItems: 'center'
             },
-            symbol: { color: '#f1f5f9', fontSize: 16, fontWeight: 'bold' },
-            price: { color: '#e2e8f0', fontSize: 16, fontWeight: 'bold' },
-            right: { alignItems: 'flex-end' },
-            label: { color: '#cbd5e1', marginTop: 15, marginBottom: 6 },
+            brand: {
+              color: '#67e8f9',
+              fontSize: 23,
+              fontWeight: '900',
+              letterSpacing: 2
+            },
+            subtitle: {
+              color: '#94a3b8',
+              fontSize: 10,
+              letterSpacing: 2,
+              marginTop: 4
+            },
+            demo: {
+              color: '#fbbf24',
+              borderWidth: 1,
+              borderColor: '#fbbf24',
+              borderRadius: 7,
+              padding: 8
+            },
+            nav: {
+              flexDirection: 'row',
+              justifyContent: 'space-around',
+              borderBottomWidth: 1,
+              borderBottomColor: '#233247',
+              paddingVertical: 8
+            },
+            navButton: {
+              padding: 8,
+              borderRadius: 7
+            },
+            navActive: {
+              backgroundColor: '#164e63'
+            },
+            navText: {
+              color: '#e2e8f0',
+              fontSize: 11
+            },
+            content: {
+              padding: 16,
+              paddingBottom: 35
+            },
+            heading: {
+              color: '#f1f5f9',
+              fontSize: 24,
+              fontWeight: 'bold',
+              marginTop: 8
+            },
+            muted: {
+              color: '#94a3b8',
+              fontSize: 12,
+              lineHeight: 19
+            },
+            card: {
+              backgroundColor: '#111d2d',
+              borderWidth: 1,
+              borderColor: '#233247',
+              borderRadius: 13,
+              padding: 16,
+              marginTop: 12
+            },
+            balance: {
+              color: '#f8fafc',
+              fontSize: 30,
+              fontWeight: 'bold',
+              marginVertical: 8
+            },
+            green: {
+              color: '#34d399',
+              fontSize: 12,
+              fontWeight: 'bold'
+            },
+            row: {
+              flexDirection: 'row',
+              marginHorizontal: -5
+            },
+            half: {
+              flex: 1,
+              marginHorizontal: 5
+            },
+            metric: {
+              color: '#f8fafc',
+              fontSize: 23,
+              fontWeight: 'bold',
+              marginTop: 8
+            },
+            section: {
+              color: '#f1f5f9',
+              fontSize: 18,
+              fontWeight: 'bold',
+              marginTop: 24
+            },
+            marketRow: {
+              flexDirection: 'row',
+              justifyContent: 'space-between',
+              alignItems: 'center'
+            },
+            symbol: {
+              color: '#f1f5f9',
+              fontSize: 16,
+              fontWeight: 'bold'
+            },
+            price: {
+              color: '#e2e8f0',
+              fontSize: 16,
+              fontWeight: 'bold'
+            },
+            right: {
+              alignItems: 'flex-end'
+            },
+            label: {
+              color: '#cbd5e1',
+              marginTop: 15,
+              marginBottom: 6
+            },
             input: {
-              color: '#fff', backgroundColor: '#08111f',
-              borderWidth: 1, borderColor: '#334155',
-              borderRadius: 8, padding: 12, fontSize: 16
+              color: '#fff',
+              backgroundColor: '#08111f',
+              borderWidth: 1,
+              borderColor: '#334155',
+              borderRadius: 8,
+              padding: 12,
+              fontSize: 16
             },
             warning: {
-              color: '#fbbf24', fontSize: 12,
-              lineHeight: 19, marginTop: 15
+              color: '#fbbf24',
+              fontSize: 12,
+              lineHeight: 19,
+              marginTop: 12
             },
             footer: {
-              color: '#67e8f9', textAlign: 'center',
-              marginTop: 28, fontSize: 11, letterSpacing: 1
+              color: '#67e8f9',
+              textAlign: 'center',
+              marginTop: 28,
+              fontSize: 11,
+              letterSpacing: 1
             },
             disclaimer: {
-              color: '#64748b', textAlign: 'center',
-              fontSize: 10, marginTop: 8
+              color: '#64748b',
+              textAlign: 'center',
+              fontSize: 10,
+              marginTop: 8
             }
           });
           EOF
 
-      - name: Install dependencies
-        run: npm install
-
-      - name: Install Android build tools
-        run: npx expo install expo-dev-client
-
-      - name: Build standalone APK
+      - name: Install Expo dependencies
+        working-directory: signalpilot
         run: |
-          npm install -g eas-cli
-          eas build --platform android --profile preview --non-interactive
-        env:
-          CI: "1"
+          npm install
+          npx expo install expo-dev-client
+
+      - name: Generate Android project
+        working-directory: signalpilot
+        run: npx expo prebuild --platform android --no-install
+
+      - name: Build APK with Gradle
+        working-directory: signalpilot/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SignalPilot-Pro-APK
+          path: signalpilot/android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
