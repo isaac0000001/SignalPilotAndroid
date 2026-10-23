@@ -1,16 +1,17 @@
 from decimal import Decimal
+
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from app.signals import Candle, analyze_market
-from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import CurrentAccount
-from app.models import Order
-from app.risk import RiskValidationError, calculate_position_size
+from app.risk import (
+    RiskValidationError,
+    calculate_position_size,
+)
 from app.schemas import (
     AccountResponse,
-    HealthResponse,
     OrderCreateRequest,
     OrderResponse,
     RiskCalculationRequest,
@@ -21,30 +22,42 @@ from app.services.orders import (
     OrderService,
     OrderServiceError,
 )
+from app.signals import Candle, analyze_market
 
 
 router = APIRouter()
 
 
-@router.get("/health", response_model=HealthResponse, tags=["System"])
+# --------------------------------------------------
+# HEALTH CHECK
+# --------------------------------------------------
+
+@router.get("/health")
 async def health_check():
-    return HealthResponse(
-        status="ok",
-        application="SignalPilot Pro",
-        version="1.0.0",
-        database="connected",
-    )
+    return {
+        "status": "ok",
+        "application": "SignalPilot Pro",
+        "live_trading_enabled": False,
+        "live_market_data": False,
+    }
 
 
-@router.get("/account", response_model=AccountResponse, tags=["Account"])
+# --------------------------------------------------
+# ACCOUNT
+# --------------------------------------------------
+
+@router.get("/account", response_model=AccountResponse)
 async def get_account(account: CurrentAccount):
     return account
 
 
+# --------------------------------------------------
+# POSITION SIZE AND RISK CALCULATION
+# --------------------------------------------------
+
 @router.post(
     "/risk/calculate",
     response_model=RiskCalculationResponse,
-    tags=["Risk"],
 )
 async def calculate_risk(request: RiskCalculationRequest):
     try:
@@ -58,9 +71,10 @@ async def calculate_risk(request: RiskCalculationRequest):
             minimum_quantity=request.minimum_quantity,
             maximum_quantity=request.maximum_quantity,
         )
+
     except RiskValidationError as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=422,
             detail=str(exc),
         ) from exc
 
@@ -74,13 +88,15 @@ async def calculate_risk(request: RiskCalculationRequest):
     )
 
 
+# --------------------------------------------------
+# SIMULATED ORDER CREATION
+# --------------------------------------------------
+
 @router.post(
     "/orders",
     response_model=OrderResponse,
-    status_code=status.HTTP_201_CREATED,
-    tags=["Orders"],
 )
-async def create_simulated_order(
+async def create_order(
     request: OrderCreateRequest,
     account: CurrentAccount,
     db: AsyncSession = Depends(get_db),
@@ -97,25 +113,54 @@ async def create_simulated_order(
 
     except DuplicateOrderConflict as exc:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
+            status_code=409,
             detail=str(exc),
         ) from exc
 
     except OrderServiceError as exc:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=400,
             detail=str(exc),
         ) from exc
-        class SignalAnalysisRequest(BaseModel):
-    symbol: str = Field(min_length=3, max_length=30)
-    candles: list[Candle] = Field(min_length=60, max_length=5000)
-    account_balance: Decimal = Field(gt=0)
-    risk_percent: Decimal = Field(gt=0, le=Decimal("1"))
-    value_per_price_unit: Decimal = Field(gt=0)
 
+
+# --------------------------------------------------
+# MARKET SIGNAL ANALYSIS REQUEST
+# --------------------------------------------------
+
+class SignalAnalysisRequest(BaseModel):
+    symbol: str = Field(
+        min_length=3,
+        max_length=30,
+    )
+
+    candles: list[Candle] = Field(
+        min_length=60,
+        max_length=5000,
+    )
+
+    account_balance: Decimal = Field(
+        gt=0,
+    )
+
+    risk_percent: Decimal = Field(
+        gt=0,
+        le=Decimal("1"),
+    )
+
+    value_per_price_unit: Decimal = Field(
+        gt=0,
+    )
+
+
+# --------------------------------------------------
+# SIGNAL ANALYSIS
+# --------------------------------------------------
 
 @router.post("/signals/analyze")
-async def analyze_signal(request: SignalAnalysisRequest):
+async def analyze_signal(
+    request: SignalAnalysisRequest,
+):
     try:
         result = analyze_market(
             symbol=request.symbol,
@@ -124,8 +169,12 @@ async def analyze_signal(request: SignalAnalysisRequest):
             risk_percent=request.risk_percent,
             value_per_price_unit=request.value_per_price_unit,
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    except (ValueError, ArithmeticError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc),
+        ) from exc
 
     return {
         "symbol": result.symbol,
