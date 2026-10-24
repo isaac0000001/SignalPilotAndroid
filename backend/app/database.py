@@ -5,30 +5,34 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.orm import DeclarativeBase
 
 from app.config import get_settings
 
 
-# Load application settings
+# SQLAlchemy model base
+class Base(DeclarativeBase):
+    pass
+
+
+# Application settings
 settings = get_settings()
 DATABASE_URL = settings.DATABASE_URL
 
 
-# Convert database URLs to asynchronous driver formats
+# Configure asynchronous database drivers
 if DATABASE_URL.startswith("sqlite://"):
     DATABASE_URL = DATABASE_URL.replace(
         "sqlite://",
         "sqlite+aiosqlite://",
         1,
     )
-
 elif DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace(
         "postgres://",
         "postgresql+asyncpg://",
         1,
     )
-
 elif DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL = DATABASE_URL.replace(
         "postgresql://",
@@ -37,7 +41,7 @@ elif DATABASE_URL.startswith("postgresql://"):
     )
 
 
-# Create the asynchronous database engine
+# Create asynchronous database engine
 engine = create_async_engine(
     DATABASE_URL,
     pool_pre_ping=True,
@@ -45,7 +49,7 @@ engine = create_async_engine(
 )
 
 
-# Create the asynchronous session factory
+# Create session factory
 AsyncSessionLocal = async_sessionmaker(
     bind=engine,
     class_=AsyncSession,
@@ -64,12 +68,12 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             raise
 
 
-# Compatibility alias for code using the previous function name
+# Compatibility with existing imports
 async def get_database() -> AsyncGenerator[AsyncSession, None]:
     async for session in get_db():
         yield session
 
 
-# Close database connections during application shutdown
+# Close database connections on shutdown
 async def close_database() -> None:
     await engine.dispose()
