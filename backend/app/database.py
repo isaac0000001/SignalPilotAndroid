@@ -9,22 +9,26 @@ from sqlalchemy.ext.asyncio import (
 from app.config import get_settings
 
 
+# Load application settings
 settings = get_settings()
 DATABASE_URL = settings.DATABASE_URL
 
-# Convert common database URLs to asynchronous drivers.
+
+# Convert database URLs to asynchronous driver formats
 if DATABASE_URL.startswith("sqlite://"):
     DATABASE_URL = DATABASE_URL.replace(
         "sqlite://",
         "sqlite+aiosqlite://",
         1,
     )
+
 elif DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace(
         "postgres://",
         "postgresql+asyncpg://",
         1,
     )
+
 elif DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL = DATABASE_URL.replace(
         "postgresql://",
@@ -32,12 +36,16 @@ elif DATABASE_URL.startswith("postgresql://"):
         1,
     )
 
+
+# Create the asynchronous database engine
 engine = create_async_engine(
     DATABASE_URL,
     pool_pre_ping=True,
     echo=False,
 )
 
+
+# Create the asynchronous session factory
 AsyncSessionLocal = async_sessionmaker(
     bind=engine,
     class_=AsyncSession,
@@ -46,7 +54,8 @@ AsyncSessionLocal = async_sessionmaker(
 )
 
 
-async def get_database() -> AsyncGenerator[AsyncSession, None]:
+# Database dependency used by API routes
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
     async with AsyncSessionLocal() as session:
         try:
             yield session
@@ -55,5 +64,12 @@ async def get_database() -> AsyncGenerator[AsyncSession, None]:
             raise
 
 
+# Compatibility alias for code using the previous function name
+async def get_database() -> AsyncGenerator[AsyncSession, None]:
+    async for session in get_db():
+        yield session
+
+
+# Close database connections during application shutdown
 async def close_database() -> None:
     await engine.dispose()
