@@ -5,58 +5,42 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.orm import DeclarativeBase
 
 from app.config import get_settings
 
 
 settings = get_settings()
 
-DATABASE_URL = settings.DATABASE_URL.get_secret_value()
+# DATABASE_URL is a regular string in the current configuration.
+DATABASE_URL = settings.DATABASE_URL
 
+# Create the database engine.
 engine = create_async_engine(
     DATABASE_URL,
     pool_pre_ping=True,
-    pool_size=5,
-    max_overflow=5,
-    pool_timeout=30,
-    pool_recycle=1800,
     echo=False,
 )
 
-AsyncSessionFactory = async_sessionmaker(
+# Create an asynchronous session factory.
+AsyncSessionLocal = async_sessionmaker(
     bind=engine,
     class_=AsyncSession,
     expire_on_commit=False,
     autoflush=False,
+    autocommit=False,
 )
 
 
-class Base(DeclarativeBase):
-    """Base class for all SQLAlchemy database models."""
-
-    pass
-
-
-async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    """Provide a database session and always close it."""
-
-    async with AsyncSessionFactory() as session:
-        yield session
-
-
-async def check_database_connection() -> bool:
-    """Check whether the database is reachable."""
-
-    from sqlalchemy import text
-
-    async with engine.connect() as connection:
-        await connection.execute(text("SELECT 1"))
-
-    return True
+async def get_database() -> AsyncGenerator[AsyncSession, None]:
+    """Provide a database session to an API request."""
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+        except Exception:
+            await session.rollback()
+            raise
 
 
 async def close_database() -> None:
-    """Release database connection resources."""
-
+    """Dispose of database connections during application shutdown."""
     await engine.dispose()
