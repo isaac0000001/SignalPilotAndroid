@@ -21,7 +21,7 @@ app = FastAPI(
     version=settings.APP_VERSION,
     description=(
         "SignalPilot Pro personal trading backend. "
-        "Real-money execution remains disabled."
+        "Live trading execution is disabled."
     ),
     lifespan=lifespan,
 )
@@ -38,5 +38,5 @@ async def root():
         "application": settings.APP_NAME,
         "version": settings.APP_VERSION,
         "status": "running",
-        "live_trading_enabled": settings.LIVE_TRADING_ENABLED,
+        "live_trading_enabled": False,
     }
