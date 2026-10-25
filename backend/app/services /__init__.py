@@ -1,1 +1,1 @@
-
+"""SignalPilot Pro application services."""
