@@ -1,6 +1,10 @@
+import logging
+import math
 import os
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 class MarketDataError(Exception):
@@ -18,7 +22,7 @@ async def fetch_forex_candles(
 
     if not api_key:
         raise MarketDataError(
-            "TWELVEDATA_API_KEY is not configured."
+            "TWELVEDATA_API_KEY is not configured on the server."
         )
 
     symbol = symbol.strip().upper()
@@ -27,24 +31,17 @@ async def fetch_forex_candles(
         raise MarketDataError("A symbol is required.")
 
     allowed_intervals = {
-        "1min",
-        "5min",
-        "15min",
-        "30min",
-        "45min",
-        "1h",
-        "2h",
-        "4h",
-        "1day",
-        "1week",
-        "1month",
+        "1min", "5min", "15min", "30min", "45min",
+        "1h", "2h", "4h", "1day", "1week", "1month",
     }
 
     if interval not in allowed_intervals:
         raise MarketDataError("Unsupported candle interval.")
 
-    if not 1 <= outputsize <= 5000:
-        raise MarketDataError("Invalid output size.")
+    if not 60 <= outputsize <= 5000:
+        raise MarketDataError(
+            "Output size must be between 60 and 5000."
+        )
 
     params = {
         "symbol": symbol,
@@ -55,22 +52,63 @@ async def fetch_forex_candles(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(
                 "https://api.twelvedata.com/time_series",
                 params=params,
             )
+
             response.raise_for_status()
             data = response.json()
 
-    except (httpx.HTTPError, ValueError) as exc:
+    except httpx.TimeoutException as exc:
+        logger.error("Twelve Data request timed out.")
         raise MarketDataError(
-            "Unable to retrieve market data."
+            "Twelve Data request timed out. Please try again."
         ) from exc
 
-    if data.get("status") == "error" or "values" not in data:
+    except httpx.HTTPStatusError as exc:
+        logger.error(
+            "Twelve Data HTTP error: status=%s",
+            exc.response.status_code,
+        )
         raise MarketDataError(
-            data.get("message", "No market candles were returned.")
+            f"Twelve Data returned HTTP {exc.response.status_code}."
+        ) from exc
+
+    except httpx.RequestError as exc:
+        logger.error(
+            "Twelve Data connection error: %s",
+            type(exc).__name__,
+        )
+        raise MarketDataError(
+            "Could not connect to Twelve Data."
+        ) from exc
+
+    except ValueError as exc:
+        logger.error("Twelve Data returned invalid JSON.")
+        raise MarketDataError(
+            "Twelve Data returned an invalid response."
+        ) from exc
+
+    if not isinstance(data, dict):
+        raise MarketDataError(
+            "Twelve Data returned an unexpected response."
+        )
+
+    if data.get("status") == "error" or "values" not in data:
+        # Log the provider's message, but never log the API key.
+        provider_message = str(
+            data.get("message", "No candle data returned.")
+        )
+
+        logger.error(
+            "Twelve Data rejected the request: %s",
+            provider_message,
+        )
+
+        raise MarketDataError(
+            f"Twelve Data error: {provider_message}"
         )
 
     candles = []
@@ -87,7 +125,7 @@ async def fetch_forex_candles(
             values = list(candle.values())
 
             if not all(
-                value > 0 and value < float("inf")
+                math.isfinite(value) and value > 0
                 for value in values
             ):
                 continue
