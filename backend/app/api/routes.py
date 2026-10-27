@@ -1,4 +1,5 @@
 from decimal import Decimal
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -6,10 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import CurrentAccount
-from app.risk import (
-    RiskValidationError,
-    calculate_position_size,
-)
+from app.risk import RiskValidationError, calculate_position_size
 from app.schemas import (
     AccountResponse,
     OrderCreateRequest,
@@ -17,50 +15,52 @@ from app.schemas import (
     RiskCalculationRequest,
     RiskCalculationResponse,
 )
+from app.services.market_data import (
+    MarketDataError,
+    fetch_forex_candles,
+)
 from app.services.orders import (
     DuplicateOrderConflict,
     OrderService,
     OrderServiceError,
-)
-from app.services.market_data import (
-    MarketDataError,
-    fetch_forex_candles,
 )
 from app.signals import Candle, analyze_market
 
 
 router = APIRouter()
 
+LIVE_MARKET_DATA_ENABLED = False
+LIVE_EXECUTION_ENABLED = False
 
-# =========================================================
-# 1. HEALTH CHECK
-# =========================================================
+
+# --------------------------------------------------
+# HEALTH CHECK
+# --------------------------------------------------
 
 @router.get("/health")
 async def health_check():
     return {
         "status": "ok",
         "application": "SignalPilot Pro",
-        "live_market_data": False,
-        "live_execution_enabled": False,
+        "live_market_data": LIVE_MARKET_DATA_ENABLED,
+        "live_execution_enabled": LIVE_EXECUTION_ENABLED,
     }
 
 
-# =========================================================
-# 2. ACCOUNT INFORMATION
-# =========================================================
+# --------------------------------------------------
+# ACCOUNT
+# --------------------------------------------------
 
-@router.get(
-    "/account",
-    response_model=AccountResponse,
-)
-async def get_account(account: CurrentAccount):
+@router.get("/account", response_model=AccountResponse)
+async def get_account(
+    account: CurrentAccount,
+):
     return account
 
 
-# =========================================================
-# 3. POSITION SIZE AND RISK CALCULATION
-# =========================================================
+# --------------------------------------------------
+# RISK CALCULATION
+# --------------------------------------------------
 
 @router.post(
     "/risk/calculate",
@@ -76,30 +76,26 @@ async def calculate_risk(
             entry_price=request.entry_price,
             stop_loss=request.stop_loss,
             value_per_price_unit=request.value_per_price_unit,
-            quantity_step=request.quantity_step,
-            minimum_quantity=request.minimum_quantity,
-            maximum_quantity=request.maximum_quantity,
         )
+
+        return result
 
     except RiskValidationError as exc:
         raise HTTPException(
-            status_code=422,
+            status_code=400,
             detail=str(exc),
         ) from exc
 
-    return RiskCalculationResponse(
-        risk_amount=result.risk_amount,
-        stop_distance=result.stop_distance,
-        estimated_loss_per_unit=result.estimated_loss_per_unit,
-        suggested_quantity=result.suggested_quantity,
-        estimated_total_risk=result.estimated_total_risk,
-        actual_risk_percent=result.actual_risk_percent,
-    )
+    except (ValueError, ArithmeticError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Unable to calculate position size from the supplied values.",
+        ) from exc
 
 
-# =========================================================
-# 4. SIMULATED ORDER CREATION
-# =========================================================
+# --------------------------------------------------
+# SIMULATED ORDER CREATION
+# --------------------------------------------------
 
 @router.post(
     "/orders",
@@ -110,6 +106,11 @@ async def create_order(
     account: CurrentAccount,
     db: AsyncSession = Depends(get_db),
 ):
+    """
+    Creates a simulated order only.
+    This endpoint does not send orders to LiteFinance.
+    """
+
     try:
         async with db.begin():
             order = await OrderService.create_simulated_order(
@@ -133,14 +134,14 @@ async def create_order(
         ) from exc
 
 
-# =========================================================
-# 5. SIGNAL ANALYSIS REQUEST
-# =========================================================
+# --------------------------------------------------
+# SIGNAL ANALYSIS REQUEST
+# --------------------------------------------------
 
 class SignalAnalysisRequest(BaseModel):
     symbol: str = Field(
         min_length=3,
-        max_length=30,
+        max_length=32,
     )
 
     candles: list[Candle] = Field(
@@ -154,7 +155,7 @@ class SignalAnalysisRequest(BaseModel):
 
     risk_percent: Decimal = Field(
         gt=0,
-        le=Decimal("1"),
+        le=5,
     )
 
     value_per_price_unit: Decimal = Field(
@@ -162,62 +163,178 @@ class SignalAnalysisRequest(BaseModel):
     )
 
 
-# =========================================================
-# 6. ANALYZE A MARKET AND GENERATE A SIGNAL
-# =========================================================
+# --------------------------------------------------
+# ANALYZE SUPPLIED MARKET CANDLES
+# --------------------------------------------------
 
 @router.post("/signals/analyze")
 async def analyze_signal(
     request: SignalAnalysisRequest,
 ):
+    """
+    Analyzes candle data supplied by the client.
+
+    This endpoint generates analysis only.
+    It does not execute a trade.
+    """
+
+    symbol = request.symbol.strip().upper().replace("-", "/")
+
+    if not symbol:
+        raise HTTPException(
+            status_code=400,
+            detail="A valid trading symbol is required.",
+        )
+
     try:
         result = analyze_market(
-            symbol=request.symbol,
             candles=request.candles,
             account_balance=request.account_balance,
             risk_percent=request.risk_percent,
             value_per_price_unit=request.value_per_price_unit,
         )
 
-    except (ValueError, ArithmeticError) as exc:
+        return {
+            "symbol": symbol,
+            "signal": result["signal"],
+            "score": result["score"],
+            "entry": result["entry"],
+            "stop_loss": result["stop_loss"],
+            "take_profit": result["take_profit"],
+            "quantity": result["quantity"],
+            "risk_amount": result["risk_amount"],
+            "reasons": result["reasons"],
+            "live_market_data": LIVE_MARKET_DATA_ENABLED,
+            "live_execution_enabled": LIVE_EXECUTION_ENABLED,
+        }
+
+    except RiskValidationError as exc:
         raise HTTPException(
-            status_code=422,
+            status_code=400,
             detail=str(exc),
         ) from exc
 
-    return {
-        "symbol": result.symbol,
-        "signal": result.signal,
-        "score": result.score,
-        "entry": result.entry,
-        "stop_loss": result.stop_loss,
-        "take_profit": result.take_profit,
-        "quantity": str(result.quantity),
-        "risk_amount": str(result.risk_amount),
-        "reasons": list(result.reasons),
-        "live_market_data": False,
-        "live_execution_enabled": False,
-    }
+    except (ValueError, ArithmeticError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Signal analysis failed because of invalid input data.",
+        ) from exc
 
 
-# =========================================================
-# 7. FETCH FOREX MARKET DATA FROM TWELVE DATA
-# =========================================================
+# --------------------------------------------------
+# MARKET DATA
+# --------------------------------------------------
 
 @router.get("/market-data/{symbol}")
 async def get_market_data(
     symbol: str,
-    interval: str = Query(
-        default="1h",
-        pattern=r"^(1min|5min|15min|30min|1h|4h|1day)$",
-    ),
+    interval: Literal[
+        "1min",
+        "5min",
+        "15min",
+        "30min",
+        "1h",
+        "4h",
+        "1day",
+    ] = Query(default="1h"),
     outputsize: int = Query(
         default=100,
         ge=60,
         le=5000,
     ),
 ):
-    normalized_symbol = symbol.upper().replace("-", "/")
+    """
+    Retrieves historical candle data from the configured
+    market-data provider.
+
+    TWELVEDATA_API_KEY must be configured on the server.
+    """
+
+    normalized_symbol = symbol.strip().upper().replace("-", "/")
+
+    if not normalized_symbol:
+        raise HTTPException(
+            status_code=400,
+            detail="A valid trading symbol is required.",
+        )
+
+    try:
+        candles = await fetch_forex_candles(
+            symbol=normalized_symbol,
+            interval=interval,
+            outputsize=outputsize,
+        )
+
+        # market_data.py returns dictionaries, not Candle objects.
+        formatted_candles = [
+            {
+                "open": candle["open"],
+                "high": candle["high"],
+                "low": candle["low"],
+                "close": candle["close"],
+            }
+            for candle in candles
+        ]
+
+        return {
+            "symbol": normalized_symbol,
+            "interval": interval,
+            "count": len(formatted_candles),
+            "candles": formatted_candles,
+            "live_market_data": True,
+            "live_execution_enabled": LIVE_EXECUTION_ENABLED,
+        }
+
+    except MarketDataError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=str(exc),
+        ) from exc
+
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="The market-data provider returned an invalid candle format.",
+        ) from exc
+
+
+# --------------------------------------------------
+# LIVE SIGNAL ENDPOINT
+# --------------------------------------------------
+
+@router.get("/signals/live/{symbol}")
+async def get_live_signal(
+    symbol: str,
+    interval: Literal[
+        "1min",
+        "5min",
+        "15min",
+        "30min",
+        "1h",
+        "4h",
+        "1day",
+    ] = Query(default="1h"),
+    outputsize: int = Query(
+        default=100,
+        ge=60,
+        le=5000,
+    ),
+):
+    """
+    Retrieves market candles.
+
+    Signal generation remains unavailable here until the
+    instrument's contract specifications and price-value
+    calculations have been validated.
+    """
+
+    normalized_symbol = symbol.strip().upper().replace("-", "/")
+
+    if not normalized_symbol:
+        raise HTTPException(
+            status_code=400,
+            detail="A valid trading symbol is required.",
+        )
 
     try:
         candles = await fetch_forex_candles(
@@ -232,68 +349,22 @@ async def get_market_data(
             detail=str(exc),
         ) from exc
 
-    return {
-        "symbol": normalized_symbol,
-        "interval": interval,
-        "candle_count": len(candles),
-        "candles": [
-            {
-                "open": candle.open,
-                "high": candle.high,
-                "low": candle.low,
-                "close": candle.close,
-            }
-            for candle in candles
-        ],
-        "source": "Twelve Data",
-        "live_execution_enabled": False,
-    }
-
-
-# =========================================================
-# 8. FETCH MARKET DATA AND ANALYZE IT IN ONE REQUEST
-# =========================================================
-
-@router.get("/signals/live/{symbol}")
-async def analyze_live_market(
-    symbol: str,
-    account_balance: Decimal = Query(
-        gt=0,
-    ),
-    risk_percent: Decimal = Query(
-        default=Decimal("0.5"),
-        gt=0,
-        le=Decimal("1"),
-    ),
-    interval: str = Query(
-        default="1h",
-        pattern=r"^(1min|5min|15min|30min|1h|4h|1day)$",
-    ),
-):
-    normalized_symbol = symbol.upper().replace("-", "/")
-
-    try:
-        candles = await fetch_forex_candles(
-            symbol=normalized_symbol,
-            interval=interval,
-            outputsize=100,
+    if len(candles) < 60:
+        raise HTTPException(
+            status_code=422,
+            detail="At least 60 valid candles are required for analysis.",
         )
 
-    except MarketDataError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=str(exc),
-        ) from exc
-
-    # Price-unit valuation is instrument-specific.
-    # Do not guess it for a real-money position.
-    # The signal calculation requires a validated value.
     raise HTTPException(
         status_code=501,
-        detail=(
-            "Market data retrieval is implemented, but automatic "
-            "signal generation requires a verified value_per_price_unit "
-            "for this instrument. Use POST /signals/analyze with a "
-            "validated value until instrument specifications are configured."
-        ),
+        detail={
+            "message": (
+                "Live signal generation is not yet enabled for this endpoint. "
+                "Instrument specifications and position-sizing calculations "
+                "must be validated first."
+            ),
+            "symbol": normalized_symbol,
+            "candles_received": len(candles),
+            "live_execution_enabled": False,
+        },
     )
