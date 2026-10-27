@@ -1,5 +1,4 @@
 import os
-from datetime import datetime, timezone
 
 import httpx
 
@@ -10,31 +9,22 @@ class MarketDataError(Exception):
 
 async def fetch_forex_candles(
     symbol: str,
-    interval: str = "5min",
+    interval: str = "1h",
     outputsize: int = 100,
-):
-    """
-    Fetch forex candles from Twelve Data.
-
-    Requires the TWELVEDATA_API_KEY environment variable.
-    """
+) -> list[dict]:
+    """Fetch OHLC candles from Twelve Data in chronological order."""
 
     api_key = os.getenv("TWELVEDATA_API_KEY")
 
     if not api_key:
         raise MarketDataError(
-            "Market data API key is not configured."
+            "TWELVEDATA_API_KEY is not configured."
         )
 
     symbol = symbol.strip().upper()
 
     if not symbol:
-        raise MarketDataError("A market symbol is required.")
-
-    if not 1 <= outputsize <= 5000:
-        raise MarketDataError(
-            "Output size must be between 1 and 5000."
-        )
+        raise MarketDataError("A symbol is required.")
 
     allowed_intervals = {
         "1min",
@@ -53,7 +43,8 @@ async def fetch_forex_candles(
     if interval not in allowed_intervals:
         raise MarketDataError("Unsupported candle interval.")
 
-    url = "https://api.twelvedata.com/time_series"
+    if not 1 <= outputsize <= 5000:
+        raise MarketDataError("Invalid output size.")
 
     params = {
         "symbol": symbol,
@@ -65,7 +56,10 @@ async def fetch_forex_candles(
 
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
-            response = await client.get(url, params=params)
+            response = await client.get(
+                "https://api.twelvedata.com/time_series",
+                params=params,
+            )
             response.raise_for_status()
             data = response.json()
 
@@ -76,7 +70,7 @@ async def fetch_forex_candles(
 
     if data.get("status") == "error" or "values" not in data:
         raise MarketDataError(
-            data.get("message", "Market data provider returned no candles.")
+            data.get("message", "No market candles were returned.")
         )
 
     candles = []
@@ -84,19 +78,17 @@ async def fetch_forex_candles(
     for item in reversed(data["values"]):
         try:
             candle = {
-                "time": item["datetime"],
                 "open": float(item["open"]),
                 "high": float(item["high"]),
                 "low": float(item["low"]),
                 "close": float(item["close"]),
-                "volume": float(item.get("volume") or 0),
             }
 
+            values = list(candle.values())
+
             if not all(
-                value == value
-                and abs(value) != float("inf")
-                for key, value in candle.items()
-                if key != "time"
+                value > 0 and value < float("inf")
+                for value in values
             ):
                 continue
 
@@ -118,7 +110,7 @@ async def fetch_forex_candles(
 
     if not candles:
         raise MarketDataError(
-            "No valid market candles were returned."
+            "The provider returned no valid candles."
         )
 
     return candles
