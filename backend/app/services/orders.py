@@ -1,12 +1,11 @@
 import json
-from decimal import Decimal, InvalidOperation
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Account, AuditEvent, Order, Position
+from app.models import Account, AuditEvent, Order
 from app.schemas import OrderCreateRequest
 
 
@@ -15,21 +14,19 @@ class OrderServiceError(Exception):
 
 
 class DuplicateOrderConflict(OrderServiceError):
-    """Raised when a client order ID has already been used."""
+    """Raised when a duplicate client order ID is detected."""
 
 
 class OrderService:
-    """Simulation-only order service."""
+    """Handles simulated orders for SignalPilot."""
 
-    def __init__(self, db: AsyncSession):
-        self.db = db
-
-    async def create_order(
-        self,
+    @staticmethod
+    async def create_simulated_order(
+        db: AsyncSession,
         account_id: UUID,
         request: OrderCreateRequest,
     ) -> Order:
-        """Create a simulated order without broker execution."""
+        """Create a pending simulated order without broker execution."""
 
         try:
             account_uuid = UUID(str(account_id))
@@ -37,24 +34,9 @@ class OrderService:
             raise OrderServiceError("Invalid account ID.") from exc
 
         if not isinstance(request, OrderCreateRequest):
-            raise OrderServiceError(
-                "An OrderCreateRequest object is required."
-            )
+            raise OrderServiceError("Invalid order request.")
 
-        quantity = request.quantity
-        requested_price = request.requested_price
-
-        if not quantity.is_finite() or quantity <= 0:
-            raise OrderServiceError("Quantity must be positive and finite.")
-
-        if requested_price is not None:
-            if not requested_price.is_finite() or requested_price <= 0:
-                raise OrderServiceError(
-                    "Requested price must be positive and finite."
-                )
-
-        # Confirm that the account exists and is active.
-        result = await self.db.execute(
+        result = await db.execute(
             select(Account)
             .where(Account.id == account_uuid)
             .with_for_update()
@@ -67,8 +49,7 @@ class OrderService:
         if not account.is_active:
             raise OrderServiceError("Account is inactive.")
 
-        # Check idempotency before inserting the order.
-        result = await self.db.execute(
+        result = await db.execute(
             select(Order).where(
                 Order.account_id == account_uuid,
                 Order.client_order_id == request.client_order_id,
@@ -86,62 +67,52 @@ class OrderService:
             symbol=request.symbol.upper(),
             side=request.side,
             order_type=request.order_type,
-            quantity=quantity,
-            requested_price=requested_price,
+            quantity=request.quantity,
+            requested_price=request.requested_price,
             filled_price=None,
             status="PENDING",
             execution_mode="SIMULATED",
         )
 
-        self.db.add(order)
+        db.add(order)
 
-        # Keep risk parameters in the audit record. They are not
-        # executed or applied to a live position.
-        self.db.add(
-            AuditEvent(
-                event_type="SIMULATED_ORDER_CREATED",
-                actor="system",
-                resource_id=request.client_order_id,
-                details=json.dumps(
-                    {
-                        "account_id": str(account_uuid),
-                        "symbol": request.symbol.upper(),
-                        "side": request.side,
-                        "order_type": request.order_type,
-                        "quantity": str(quantity),
-                        "requested_price": (
-                            str(requested_price)
-                            if requested_price is not None
-                            else None
-                        ),
-                        "stop_loss": (
-                            str(request.stop_loss)
-                            if request.stop_loss is not None
-                            else None
-                        ),
-                        "take_profit": (
-                            str(request.take_profit)
-                            if request.take_profit is not None
-                            else None
-                        ),
-                        "execution_mode": "SIMULATED",
-                    }
+        audit_event = AuditEvent(
+            event_type="SIMULATED_ORDER_CREATED",
+            actor="system",
+            resource_id=request.client_order_id,
+            details=json.dumps({
+                "account_id": str(account_uuid),
+                "symbol": request.symbol.upper(),
+                "side": request.side,
+                "order_type": request.order_type,
+                "quantity": str(request.quantity),
+                "requested_price": (
+                    str(request.requested_price)
+                    if request.requested_price is not None
+                    else None
                 ),
-            )
+                "stop_loss": (
+                    str(request.stop_loss)
+                    if request.stop_loss is not None
+                    else None
+                ),
+                "take_profit": (
+                    str(request.take_profit)
+                    if request.take_profit is not None
+                    else None
+                ),
+                "execution_mode": "SIMULATED",
+            }),
         )
+        db.add(audit_event)
 
         try:
-            await self.db.commit()
-            await self.db.refresh(order)
+            await db.flush()
+            await db.refresh(order)
 
         except IntegrityError as exc:
-            await self.db.rollback()
             raise DuplicateOrderConflict(
-                "Order creation conflicted with an existing database record."
+                "Order conflicts with an existing database record."
             ) from exc
-
-        except Exception:
-            await self.db.rollback()
-            raise
 
         return order
