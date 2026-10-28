@@ -1,6 +1,7 @@
 import logging
 import math
 import os
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -29,8 +30,6 @@ class MarketDataError(Exception):
 
 
 def normalize_symbol(symbol: str) -> str:
-    """Normalize common forex symbols for Twelve Data."""
-
     if not isinstance(symbol, str):
         raise MarketDataError("Symbol must be text.")
 
@@ -39,7 +38,6 @@ def normalize_symbol(symbol: str) -> str:
     if not symbol:
         raise MarketDataError("A symbol is required.")
 
-    # Convert EURUSD to EUR/USD.
     if "/" not in symbol and len(symbol) == 6 and symbol.isalpha():
         symbol = f"{symbol[:3]}/{symbol[3:]}"
 
@@ -51,35 +49,23 @@ async def fetch_forex_candles(
     interval: str = "1h",
     outputsize: int = 100,
 ) -> list[dict[str, Any]]:
-    """
-    Retrieve historical OHLC candles from Twelve Data.
-
-    Returns candles in chronological order, oldest first.
-    The API key must be configured as TWELVEDATA_API_KEY
-    in the server environment.
-    """
+    """Fetch validated OHLC candles in chronological order."""
 
     api_key = os.getenv("TWELVEDATA_API_KEY")
 
     if not api_key or not api_key.strip():
-        raise MarketDataError(
-            "Market data is not configured: API key is missing."
-        )
+        raise MarketDataError("Market data API key is not configured.")
 
     normalized_symbol = normalize_symbol(symbol)
 
     if interval not in ALLOWED_INTERVALS:
-        raise MarketDataError(
-            f"Unsupported interval: {interval}."
-        )
+        raise MarketDataError(f"Unsupported interval: {interval}")
 
     if isinstance(outputsize, bool) or not isinstance(outputsize, int):
         raise MarketDataError("Output size must be an integer.")
 
     if not 60 <= outputsize <= 5000:
-        raise MarketDataError(
-            "Output size must be between 60 and 5000."
-        )
+        raise MarketDataError("Output size must be between 60 and 5000.")
 
     params = {
         "symbol": normalized_symbol,
@@ -94,76 +80,36 @@ async def fetch_forex_candles(
             timeout=httpx.Timeout(30.0, connect=10.0),
             follow_redirects=True,
         ) as client:
-            response = await client.get(
-                TWELVE_DATA_URL,
-                params=params,
-            )
-
+            response = await client.get(TWELVE_DATA_URL, params=params)
             response.raise_for_status()
-
             data = response.json()
 
     except httpx.TimeoutException as exc:
-        logger.warning("Twelve Data request timed out.")
-        raise MarketDataError(
-            "The market-data provider timed out. Please retry."
-        ) from exc
+        raise MarketDataError("Market-data provider timed out.") from exc
 
     except httpx.HTTPStatusError as exc:
-        status_code = exc.response.status_code
-
-        logger.error(
-            "Twelve Data returned HTTP status %s.",
-            status_code,
-        )
-
         raise MarketDataError(
-            f"The market-data provider returned HTTP {status_code}."
+            f"Market-data provider returned HTTP {exc.response.status_code}."
         ) from exc
 
     except httpx.RequestError as exc:
-        logger.error(
-            "Twelve Data connection failed: %s",
-            type(exc).__name__,
-        )
-
-        raise MarketDataError(
-            "Unable to connect to the market-data provider."
-        ) from exc
+        logger.warning("Twelve Data connection failed: %s", type(exc).__name__)
+        raise MarketDataError("Unable to connect to market-data provider.") from exc
 
     except ValueError as exc:
-        logger.error("Twelve Data returned invalid JSON.")
-        raise MarketDataError(
-            "The market-data provider returned invalid JSON."
-        ) from exc
+        raise MarketDataError("Market-data provider returned invalid JSON.") from exc
 
     if not isinstance(data, dict):
-        raise MarketDataError(
-            "Unexpected response from the market-data provider."
-        )
+        raise MarketDataError("Unexpected provider response.")
 
-    # Twelve Data may return an error in JSON even with HTTP 200.
     if data.get("status") == "error" or "values" not in data:
-        provider_message = str(
-            data.get("message", "No candle data was returned.")
-        )
-
-        # Do not log the request URL or API key.
-        logger.warning(
-            "Twelve Data rejected the market-data request: %s",
-            provider_message,
-        )
-
-        raise MarketDataError(
-            f"Twelve Data error: {provider_message}"
-        )
+        message = str(data.get("message", "No candle data returned."))
+        raise MarketDataError(f"Twelve Data error: {message}")
 
     raw_values = data.get("values")
 
     if not isinstance(raw_values, list):
-        raise MarketDataError(
-            "The provider returned an invalid candle list."
-        )
+        raise MarketDataError("Provider returned an invalid candle list.")
 
     candles: list[dict[str, Any]] = []
 
@@ -173,7 +119,13 @@ async def fetch_forex_candles(
             continue
 
         try:
+            timestamp = str(item["datetime"])
+
+            # Check the timestamp format without changing the original value.
+            datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+
             candle = {
+                "timestamp": timestamp,
                 "open": float(item["open"]),
                 "high": float(item["high"]),
                 "low": float(item["low"]),
@@ -182,43 +134,32 @@ async def fetch_forex_candles(
         except (KeyError, TypeError, ValueError):
             continue
 
-        prices = list(candle.values())
+        prices = [
+            candle["open"],
+            candle["high"],
+            candle["low"],
+            candle["close"],
+        ]
 
-        if not all(
-            math.isfinite(price) and price > 0
-            for price in prices
-        ):
+        if not all(math.isfinite(price) and price > 0 for price in prices):
+            continue
+
+        if candle["high"] < max(candle["open"], candle["close"]):
+            continue
+
+        if candle["low"] > min(candle["open"], candle["close"]):
             continue
 
         if candle["high"] < candle["low"]:
             continue
 
-        if candle["high"] < max(
-            candle["open"],
-            candle["close"],
-        ):
-            continue
-
-        if candle["low"] > min(
-            candle["open"],
-            candle["close"],
-        ):
-            continue
-
         candles.append(candle)
 
     if not candles:
-        logger.warning(
-            "No valid candles received for symbol %s.",
-            normalized_symbol,
-        )
-
-        raise MarketDataError(
-            "The provider returned no valid candles for this symbol."
-        )
+        raise MarketDataError("Provider returned no valid candles.")
 
     logger.info(
-        "Retrieved %s candles for %s at interval %s.",
+        "Retrieved %d candles for %s at %s.",
         len(candles),
         normalized_symbol,
         interval,
