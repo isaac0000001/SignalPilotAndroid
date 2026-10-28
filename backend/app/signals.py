@@ -1,13 +1,14 @@
-from dataclasses import dataclass
-from decimal import Decimal, ROUND_DOWN
-from typing import Literal, Sequence
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+from typing import Any, Literal, Sequence
 import math
 
 
-Signal = Literal["BUY", "SELL", "NO TRADE"]
+Mode = Literal["day_trading", "scalping", "smart_adaptive"]
 
 
-@dataclass(frozen=True)
+@dataclass
 class Candle:
     open: float
     high: float
@@ -15,17 +16,21 @@ class Candle:
     close: float
 
 
-@dataclass(frozen=True)
+@dataclass
 class SignalResult:
     symbol: str
-    signal: Signal
+    mode: str
+    signal: str
     score: int
-    entry: float | None
-    stop_loss: float | None
-    take_profit: float | None
-    quantity: Decimal
-    risk_amount: Decimal
-    reasons: tuple[str, ...]
+    entry_price: float
+    stop_loss: float
+    take_profit: float
+    risk_reward_ratio: float
+    position_size: float
+    risk_amount: float
+    market_regime: str
+    timeframe_alignment: dict[str, str]
+    reasons: list[str]
 
 
 def _validate_candles(candles: Sequence[Candle]) -> None:
@@ -33,52 +38,72 @@ def _validate_candles(candles: Sequence[Candle]) -> None:
         raise ValueError("At least 60 candles are required.")
 
     for candle in candles:
-        values = (candle.open, candle.high, candle.low, candle.close)
+        values = [
+            candle.open,
+            candle.high,
+            candle.low,
+            candle.close,
+        ]
 
-        if not all(math.isfinite(value) and value > 0 for value in values):
-            raise ValueError("Candle prices must be finite and positive.")
+        if not all(math.isfinite(float(v)) for v in values):
+            raise ValueError("Candles must contain finite numeric values.")
 
-        if candle.high < max(candle.open, candle.close, candle.low):
-            raise ValueError("Candle high is inconsistent.")
+        if candle.high < candle.low:
+            raise ValueError("Candle high cannot be below its low.")
 
-        if candle.low > min(candle.open, candle.close, candle.high):
-            raise ValueError("Candle low is inconsistent.")
+        if candle.high < max(candle.open, candle.close):
+            raise ValueError("Candle high is inconsistent with OHLC values.")
+
+        if candle.low > min(candle.open, candle.close):
+            raise ValueError("Candle low is inconsistent with OHLC values.")
+
+        if candle.low <= 0:
+            raise ValueError("Candle prices must be positive.")
 
 
-def _ema(values: Sequence[float], period: int) -> float:
+def _ema_series(values: Sequence[float], period: int) -> list[float]:
+    if period <= 0:
+        raise ValueError("EMA period must be positive.")
+
     if len(values) < period:
-        raise ValueError("Insufficient data for EMA.")
+        return []
 
-    alpha = 2.0 / (period + 1)
-    result = sum(values[:period]) / period
+    result = [float("nan")] * (period - 1)
+    initial = sum(values[:period]) / period
+    result.append(initial)
+
+    multiplier = 2.0 / (period + 1)
+    previous = initial
 
     for value in values[period:]:
-        result = alpha * value + (1.0 - alpha) * result
+        previous = (value - previous) * multiplier + previous
+        result.append(previous)
 
     return result
 
 
 def _rsi(values: Sequence[float], period: int = 14) -> float:
     if len(values) <= period:
-        raise ValueError("Insufficient data for RSI.")
+        return 50.0
 
-    changes = [
-        values[index] - values[index - 1]
-        for index in range(1, len(values))
-    ]
+    gains = []
+    losses = []
 
-    gains = [max(change, 0.0) for change in changes]
-    losses = [max(-change, 0.0) for change in changes]
+    for index in range(1, len(values)):
+        change = values[index] - values[index - 1]
+        gains.append(max(change, 0.0))
+        losses.append(max(-change, 0.0))
 
     average_gain = sum(gains[:period]) / period
     average_loss = sum(losses[:period]) / period
 
-    for gain, loss in zip(gains[period:], losses[period:]):
+    for index in range(period, len(gains)):
         average_gain = (
-            average_gain * (period - 1) + gain
+            average_gain * (period - 1) + gains[index]
         ) / period
+
         average_loss = (
-            average_loss * (period - 1) + loss
+            average_loss * (period - 1) + losses[index]
         ) / period
 
     if average_loss == 0:
@@ -89,225 +114,417 @@ def _rsi(values: Sequence[float], period: int = 14) -> float:
 
 
 def _atr(candles: Sequence[Candle], period: int = 14) -> float:
+    if len(candles) < period + 1:
+        raise ValueError("Not enough candles to calculate ATR.")
+
     true_ranges = []
 
     for index in range(1, len(candles)):
         current = candles[index]
-        previous_close = candles[index - 1].close
+        previous = candles[index - 1]
 
-        true_ranges.append(
-            max(
-                current.high - current.low,
-                abs(current.high - previous_close),
-                abs(current.low - previous_close),
-            )
+        true_range = max(
+            current.high - current.low,
+            abs(current.high - previous.close),
+            abs(current.low - previous.close),
         )
 
-    if len(true_ranges) < period:
-        raise ValueError("Insufficient data for ATR.")
+        true_ranges.append(true_range)
 
-    result = sum(true_ranges[:period]) / period
+    value = sum(true_ranges[:period]) / period
 
-    for value in true_ranges[period:]:
-        result = ((result * (period - 1)) + value) / period
+    for current_range in true_ranges[period:]:
+        value = (
+            value * (period - 1) + current_range
+        ) / period
 
-    return result
+    return value
 
 
-def analyze_market(
-    *,
-    symbol: str,
-    candles: Sequence[Candle],
-    account_balance: Decimal,
-    risk_percent: Decimal = Decimal("0.5"),
-    reward_risk_ratio: Decimal = Decimal("2"),
-    value_per_price_unit: Decimal,
-    quantity_step: Decimal = Decimal("0.01"),
-    minimum_quantity: Decimal = Decimal("0.01"),
-    maximum_quantity: Decimal = Decimal("100"),
-) -> SignalResult:
-    """
-    Analyze chronological OHLC candles.
+def _indicators(candles: Sequence[Candle]) -> dict[str, float]:
+    closes = [c.close for c in candles]
 
-    Candle data must be ordered oldest to newest.
-    value_per_price_unit must represent the monetary value of a
-    1.0 price move for one unit of quantity in the account currency.
+    ema20_series = _ema_series(closes, 20)
+    ema50_series = _ema_series(closes, 50)
+    ema12_series = _ema_series(closes, 12)
+    ema26_series = _ema_series(closes, 26)
 
-    This is a research signal, not a broker execution instruction.
-    """
+    macd_values = [
+        fast - slow
+        for fast, slow in zip(ema12_series, ema26_series)
+        if math.isfinite(fast) and math.isfinite(slow)
+    ]
 
-    _validate_candles(candles)
+    macd_signal_series = _ema_series(macd_values, 9)
 
-    if not symbol.strip():
-        raise ValueError("Symbol is required.")
+    if not macd_values or not macd_signal_series:
+        raise ValueError("Not enough data to calculate MACD.")
 
-    if not account_balance.is_finite() or account_balance <= 0:
-        raise ValueError("Account balance must be positive.")
+    return {
+        "close": closes[-1],
+        "ema20": ema20_series[-1],
+        "ema50": ema50_series[-1],
+        "rsi": _rsi(closes, 14),
+        "atr": _atr(candles, 14),
+        "macd": macd_values[-1],
+        "macd_signal": macd_signal_series[-1],
+    }
 
-    if not risk_percent.is_finite() or not (
-        Decimal("0") < risk_percent <= Decimal("1")
+
+def _direction(indicators: dict[str, float]) -> str:
+    if (
+        indicators["ema20"] > indicators["ema50"]
+        and indicators["close"] > indicators["ema20"]
+        and indicators["macd"] > indicators["macd_signal"]
     ):
-        raise ValueError("Risk percentage must be greater than 0 and at most 1%.")
+        return "BUY"
 
-    if not reward_risk_ratio.is_finite() or reward_risk_ratio <= 0:
-        raise ValueError("Reward/risk ratio must be positive.")
+    if (
+        indicators["ema20"] < indicators["ema50"]
+        and indicators["close"] < indicators["ema20"]
+        and indicators["macd"] < indicators["macd_signal"]
+    ):
+        return "SELL"
 
-    if not value_per_price_unit.is_finite() or value_per_price_unit <= 0:
-        raise ValueError("Price-unit value must be positive.")
+    return "NO_TRADE"
 
-    if not quantity_step.is_finite() or quantity_step <= 0:
-        raise ValueError("Quantity step must be positive.")
 
-    if not minimum_quantity.is_finite() or minimum_quantity <= 0:
-        raise ValueError("Minimum quantity must be positive.")
+def _market_regime(indicators: dict[str, float]) -> str:
+    close = indicators["close"]
+    atr = indicators["atr"]
 
-    if not maximum_quantity.is_finite() or maximum_quantity < minimum_quantity:
-        raise ValueError("Maximum quantity must be at least the minimum quantity.")
+    if close <= 0 or atr <= 0:
+        return "UNSUITABLE"
 
-    closes = [candle.close for candle in candles]
-    latest = candles[-1]
-    reasons: list[str] = []
+    volatility = atr / close
 
-    ema20 = _ema(closes, 20)
-    ema50 = _ema(closes, 50)
-    rsi = _rsi(closes)
-    atr = _atr(candles)
+    if volatility > 0.03:
+        return "HIGH_VOLATILITY"
 
-    if atr <= 0 or not math.isfinite(atr):
-        raise ValueError("Market volatility is not suitable for calculation.")
+    if (
+        abs(indicators["ema20"] - indicators["ema50"])
+        / close
+        < 0.0005
+    ):
+        return "RANGING"
 
-    macd_line = _ema(closes, 12) - _ema(closes, 26)
+    return "TRENDING"
 
-    # A conservative directional score. This is not a probability.
-    buy_score = 0
-    sell_score = 0
 
-    if latest.close > ema20 > ema50:
-        buy_score += 2
-        reasons.append("Bullish EMA trend.")
-    elif latest.close < ema20 < ema50:
-        sell_score += 2
-        reasons.append("Bearish EMA trend.")
+def _score(
+    indicators: dict[str, float],
+    direction: str,
+) -> int:
+    if direction == "NO_TRADE":
+        return 0
 
-    if rsi >= 50 and rsi < 70:
-        buy_score += 1
-        reasons.append("Positive RSI momentum.")
-    elif rsi <= 50 and rsi > 30:
-        sell_score += 1
-        reasons.append("Negative RSI momentum.")
-
-    if macd_line > 0:
-        buy_score += 1
-        reasons.append("Positive MACD line.")
-    elif macd_line < 0:
-        sell_score += 1
-        reasons.append("Negative MACD line.")
-
-    if rsi >= 70:
-        reasons.append("RSI is overbought; avoid chasing.")
-    elif rsi <= 30:
-        reasons.append("RSI is oversold; reversal risk is elevated.")
-
-    if buy_score >= 3 and buy_score > sell_score:
-        direction: Signal = "BUY"
-    elif sell_score >= 3 and sell_score > buy_score:
-        direction = "SELL"
-    else:
-        direction = "NO TRADE"
-        reasons.append("Directional evidence is insufficient.")
-
-    score = max(buy_score, sell_score)
-
-    if direction == "NO TRADE":
-        return SignalResult(
-            symbol=symbol.upper(),
-            signal=direction,
-            score=score,
-            entry=None,
-            stop_loss=None,
-            take_profit=None,
-            quantity=Decimal("0"),
-            risk_amount=Decimal("0"),
-            reasons=tuple(reasons),
-        )
-
-    entry = latest.close
-    stop_distance = atr * 1.5
+    score = 50
 
     if direction == "BUY":
-        stop_loss = entry - stop_distance
-        take_profit = entry + (
-            stop_distance * float(reward_risk_ratio)
-        )
+        if indicators["ema20"] > indicators["ema50"]:
+            score += 10
+
+        if indicators["macd"] > indicators["macd_signal"]:
+            score += 10
+
+        if 50 <= indicators["rsi"] <= 68:
+            score += 10
+        elif indicators["rsi"] > 75:
+            score -= 15
+
     else:
-        stop_loss = entry + stop_distance
-        take_profit = entry - (
-            stop_distance * float(reward_risk_ratio)
+        if indicators["ema20"] < indicators["ema50"]:
+            score += 10
+
+        if indicators["macd"] < indicators["macd_signal"]:
+            score += 10
+
+        if 32 <= indicators["rsi"] <= 50:
+            score += 10
+        elif indicators["rsi"] < 25:
+            score -= 15
+
+    if _market_regime(indicators) == "HIGH_VOLATILITY":
+        score -= 15
+
+    return max(0, min(100, score))
+
+
+def _build_result(
+    symbol: str,
+    mode: str,
+    candles: Sequence[Candle],
+    indicators: dict[str, float],
+    direction: str,
+    score: int,
+    account_balance: float,
+    risk_percent: float,
+    value_per_price_unit: float,
+    risk_reward_ratio: float,
+    timeframe_alignment: dict[str, str],
+    reasons: list[str],
+    minimum_score: int = 60,
+) -> SignalResult:
+    entry = indicators["close"]
+    atr = indicators["atr"]
+
+    if direction == "NO_TRADE":
+        reasons.append("Indicators do not agree on direction.")
+
+    if score < minimum_score:
+        reasons.append(
+            f"Signal score is below the minimum of {minimum_score}."
+        )
+        direction = "NO_TRADE"
+
+    if _market_regime(indicators) == "HIGH_VOLATILITY":
+        reasons.append("Volatility is elevated; avoid entering blindly.")
+        direction = "NO_TRADE"
+
+    if account_balance <= 0:
+        raise ValueError("Account balance must be positive.")
+
+    if not 0 < risk_percent <= 1:
+        raise ValueError("Risk percentage must be above 0 and at most 1.")
+
+    if value_per_price_unit <= 0:
+        raise ValueError("Value per price unit must be positive.")
+
+    if risk_reward_ratio < 1:
+        raise ValueError("Risk-reward ratio must be at least 1:1.")
+
+    risk_amount = account_balance * risk_percent / 100.0
+
+    if direction == "BUY":
+        stop_loss = entry - 1.5 * atr
+        take_profit = entry + 1.5 * atr * risk_reward_ratio
+    elif direction == "SELL":
+        stop_loss = entry + 1.5 * atr
+        take_profit = entry - 1.5 * atr * risk_reward_ratio
+    else:
+        stop_loss = entry
+        take_profit = entry
+        risk_amount = 0.0
+
+    stop_distance = abs(entry - stop_loss)
+
+    position_size = 0.0
+
+    if direction != "NO_TRADE" and stop_distance > 0:
+        position_size = risk_amount / (
+            stop_distance * value_per_price_unit
         )
 
-    if stop_loss <= 0 or take_profit <= 0:
-        raise ValueError("Calculated price levels are invalid.")
+        estimated_risk = (
+            position_size * stop_distance * value_per_price_unit
+        )
 
-    risk_amount = (
-        account_balance * risk_percent / Decimal("100")
+        if estimated_risk > risk_amount + 1e-8:
+            direction = "NO_TRADE"
+            position_size = 0.0
+            risk_amount = 0.0
+            stop_loss = entry
+            take_profit = entry
+            reasons.append("Position sizing exceeds the risk budget.")
+
+    reasons.append(
+        "The score is a rule-based indicator score, not a win probability."
     )
-
-    distance_decimal = Decimal(str(abs(entry - stop_loss)))
-    loss_per_unit = distance_decimal * value_per_price_unit
-
-    if loss_per_unit <= 0:
-        raise ValueError("Invalid estimated loss per unit.")
-
-    raw_quantity = risk_amount / loss_per_unit
-
-    quantity = (
-        (raw_quantity / quantity_step).to_integral_value(
-            rounding=ROUND_DOWN
-        )
-        * quantity_step
+    reasons.append(
+        "Position size is an estimate; verify broker contract specifications, "
+        "pip/tick value, account currency conversion, spread and commission."
     )
-
-    # Never round up to the broker minimum if that would exceed risk.
-    if quantity < minimum_quantity:
-        reasons.append("NO TRADE: minimum quantity exceeds calculated risk.")
-        return SignalResult(
-            symbol=symbol.upper(),
-            signal="NO TRADE",
-            score=score,
-            entry=None,
-            stop_loss=None,
-            take_profit=None,
-            quantity=Decimal("0"),
-            risk_amount=Decimal("0"),
-            reasons=tuple(reasons),
-        )
-
-    quantity = min(quantity, maximum_quantity)
-    estimated_risk = quantity * loss_per_unit
-
-    # Maximum quantity is applied before the risk check.
-    if estimated_risk > risk_amount:
-        reasons.append("NO TRADE: calculated risk exceeds the risk budget.")
-        return SignalResult(
-            symbol=symbol.upper(),
-            signal="NO TRADE",
-            score=score,
-            entry=None,
-            stop_loss=None,
-            take_profit=None,
-            quantity=Decimal("0"),
-            risk_amount=Decimal("0"),
-            reasons=tuple(reasons),
-        )
 
     return SignalResult(
         symbol=symbol.upper(),
+        mode=mode,
         signal=direction,
         score=score,
-        entry=entry,
-        stop_loss=stop_loss,
-        take_profit=take_profit,
-        quantity=quantity,
-        risk_amount=estimated_risk,
-        reasons=tuple(reasons),
+        entry_price=round(entry, 8),
+        stop_loss=round(stop_loss, 8),
+        take_profit=round(take_profit, 8),
+        risk_reward_ratio=risk_reward_ratio,
+        position_size=round(position_size, 4),
+        risk_amount=round(risk_amount, 2),
+        market_regime=_market_regime(indicators),
+        timeframe_alignment=timeframe_alignment,
+        reasons=reasons,
     )
+
+
+def analyze_market(
+    candles: Sequence[Candle],
+    account_balance: float = 1000.0,
+    risk_percent: float = 0.5,
+    value_per_price_unit: float = 1.0,
+    risk_reward_ratio: float = 2.0,
+    symbol: str = "UNKNOWN",
+) -> SignalResult:
+    """Analyze a single timeframe. Not a guarantee of profitability."""
+
+    _validate_candles(candles)
+    indicators = _indicators(candles)
+    direction = _direction(indicators)
+    score = _score(indicators, direction)
+
+    return _build_result(
+        symbol=symbol,
+        mode="single_timeframe",
+        candles=candles,
+        indicators=indicators,
+        direction=direction,
+        score=score,
+        account_balance=account_balance,
+        risk_percent=risk_percent,
+        value_per_price_unit=value_per_price_unit,
+        risk_reward_ratio=risk_reward_ratio,
+        timeframe_alignment={},
+        reasons=["Single-timeframe technical analysis."],
+    )
+
+
+def analyze_multi_timeframe(
+    market_data: dict[str, Sequence[Candle]],
+    mode: Mode = "smart_adaptive",
+    account_balance: float = 1000.0,
+    risk_percent: float = 0.5,
+    value_per_price_unit: float = 1.0,
+    risk_reward_ratio: float = 2.0,
+    symbol: str = "UNKNOWN",
+) -> SignalResult:
+    """Analyze supplied timeframes and return a conservative signal."""
+
+    if mode not in ("day_trading", "scalping", "smart_adaptive"):
+        raise ValueError("Unsupported trading mode.")
+
+    for timeframe, candles in market_data.items():
+        _validate_candles(candles)
+
+    if mode == "day_trading":
+        required = ("4h", "1h", "15min")
+    elif mode == "scalping":
+        required = ("1h", "15min", "5min")
+    else:
+        required = ("4h", "1h", "15min", "5min")
+
+    missing = [tf for tf in required if tf not in market_data]
+
+    if missing:
+        raise ValueError(
+            "Missing required timeframes: " + ", ".join(missing)
+        )
+
+    indicators_by_tf = {
+        tf: _indicators(market_data[tf])
+        for tf in required
+    }
+
+    directions = {
+        tf: _direction(indicators)
+        for tf, indicators in indicators_by_tf.items()
+    }
+
+    selected_mode = mode
+
+    if mode == "smart_adaptive":
+        higher_buy = (
+            directions["4h"] == "BUY"
+            and directions["1h"] == "BUY"
+        )
+        higher_sell = (
+            directions["4h"] == "SELL"
+            and directions["1h"] == "SELL"
+        )
+
+        if higher_buy or higher_sell:
+            selected_mode = "day_trading"
+            entry_tf = "15min"
+            required_for_alignment = ("4h", "1h", "15min")
+        else:
+            selected_mode = "scalping"
+            entry_tf = "5min"
+            required_for_alignment = ("1h", "15min", "5min")
+
+            if (
+                directions["1h"] not in ("BUY", "SELL")
+                or directions["1h"] != directions["15min"]
+            ):
+                return _build_result(
+                    symbol=symbol,
+                    mode="smart_adaptive",
+                    candles=market_data["5min"],
+                    indicators=indicators_by_tf["5min"],
+                    direction="NO_TRADE",
+                    score=0,
+                    account_balance=account_balance,
+                    risk_percent=risk_percent,
+                    value_per_price_unit=value_per_price_unit,
+                    risk_reward_ratio=risk_reward_ratio,
+                    timeframe_alignment=directions,
+                    reasons=[
+                        "No clear alignment for adaptive strategy selection."
+                    ],
+                )
+
+    elif selected_mode == "day_trading":
+        entry_tf = "15min"
+        required_for_alignment = ("4h", "1h", "15min")
+    else:
+        entry_tf = "5min"
+        required_for_alignment = ("1h", "15min", "5min")
+
+    alignment_directions = [
+        directions[tf] for tf in required_for_alignment
+    ]
+
+    if (
+        alignment_directions[0] not in ("BUY", "SELL")
+        or len(set(alignment_directions)) != 1
+    ):
+        return _build_result(
+            symbol=symbol,
+            mode=selected_mode,
+            candles=market_data[entry_tf],
+            indicators=indicators_by_tf[entry_tf],
+            direction="NO_TRADE",
+            score=0,
+            account_balance=account_balance,
+            risk_percent=risk_percent,
+            value_per_price_unit=value_per_price_unit,
+            risk_reward_ratio=risk_reward_ratio,
+            timeframe_alignment=directions,
+            reasons=[
+                "Timeframes are not fully aligned; no trade is recommended."
+            ],
+        )
+
+    direction = alignment_directions[0]
+    entry_indicators = indicators_by_tf[entry_tf]
+    score = min(
+        _score(indicators_by_tf[tf], direction)
+        for tf in required_for_alignment
+    )
+
+    return _build_result(
+        symbol=symbol,
+        mode=selected_mode,
+        candles=market_data[entry_tf],
+        indicators=entry_indicators,
+        direction=direction,
+        score=score,
+        account_balance=account_balance,
+        risk_percent=risk_percent,
+        value_per_price_unit=value_per_price_unit,
+        risk_reward_ratio=risk_reward_ratio,
+        timeframe_alignment=directions,
+        reasons=[
+            f"Selected strategy: {selected_mode}.",
+            "All required timeframes agree on direction.",
+        ],
+    )
+
+
+def result_to_dict(result: SignalResult) -> dict[str, Any]:
+    """Convert a SignalResult to a JSON-serializable dictionary."""
+
+    return asdict(result)
