@@ -1,370 +1,293 @@
-from decimal import Decimal
-from typing import Literal
+from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+import logging
+import os
+from typing import Any, Literal
+
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_db
-from app.dependencies import CurrentAccount
-from app.risk import RiskValidationError, calculate_position_size
-from app.schemas import (
-    AccountResponse,
-    OrderCreateRequest,
-    OrderResponse,
-    RiskCalculationRequest,
-    RiskCalculationResponse,
+from app.signals import (
+    Candle,
+    analyze_market,
+    analyze_multi_timeframe,
+    result_to_dict,
 )
 from app.services.market_data import (
     MarketDataError,
     fetch_forex_candles,
 )
-from app.services.orders import (
-    DuplicateOrderConflict,
-    OrderService,
-    OrderServiceError,
-)
-from app.signals import Candle, analyze_market
 
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-LIVE_MARKET_DATA_ENABLED = False
 LIVE_EXECUTION_ENABLED = False
 
 
-# --------------------------------------------------
-# HEALTH CHECK
-# --------------------------------------------------
+class SignalAnalysisRequest(BaseModel):
+    symbol: str = Field(..., min_length=3, max_length=20)
+    candles: list[dict[str, float]]
+    account_balance: float = Field(1000.0, gt=0)
+    risk_percent: float = Field(0.5, gt=0, le=1)
+    value_per_price_unit: float = Field(..., gt=0)
+    risk_reward_ratio: float = Field(2.0, ge=1)
+
+
+class MultiTimeframeSignalRequest(BaseModel):
+    symbol: str = Field(..., min_length=3, max_length=20)
+    mode: Literal[
+        "day_trading",
+        "scalping",
+        "smart_adaptive",
+    ] = "smart_adaptive"
+
+    account_balance: float = Field(1000.0, gt=0)
+    risk_percent: float = Field(0.5, gt=0, le=1)
+    value_per_price_unit: float = Field(..., gt=0)
+    risk_reward_ratio: float = Field(2.0, ge=1)
+
+
+def _to_candles(rows: list[dict[str, Any]]) -> list[Candle]:
+    candles: list[Candle] = []
+
+    for row in rows:
+        try:
+            candles.append(
+                Candle(
+                    open=float(row["open"]),
+                    high=float(row["high"]),
+                    low=float(row["low"]),
+                    close=float(row["close"]),
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="Market data contains invalid candle values.",
+            ) from exc
+
+    return candles
+
+
+def _fetch(symbol: str, interval: str) -> list[dict[str, Any]]:
+    try:
+        rows = fetch_forex_candles(
+            symbol=symbol,
+            interval=interval,
+            outputsize=120,
+        )
+    except MarketDataError as exc:
+        logger.warning(
+            "Market data request failed for %s %s: %s",
+            symbol,
+            interval,
+            exc,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Market data unavailable for {symbol} ({interval}).",
+        ) from exc
+    except Exception as exc:
+        logger.exception("Unexpected market data error")
+        raise HTTPException(
+            status_code=502,
+            detail="Unexpected market data provider error.",
+        ) from exc
+
+    if not isinstance(rows, list) or len(rows) < 60:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Insufficient candle history for {symbol} ({interval}).",
+        )
+
+    return rows
+
 
 @router.get("/health")
-async def health_check():
+def health() -> dict[str, Any]:
     return {
         "status": "ok",
-        "application": "SignalPilot Pro",
-        "live_market_data": LIVE_MARKET_DATA_ENABLED,
+        "service": "SignalPilot Pro",
+        "live_execution_enabled": LIVE_EXECUTION_ENABLED,
+        "note": "Health status does not guarantee market data availability.",
+    }
+
+
+@router.get("/market-data/{symbol}")
+def get_market_data(
+    symbol: str,
+    interval: str = Query("1h"),
+    outputsize: int = Query(120, ge=60, le=5000),
+) -> dict[str, Any]:
+    try:
+        rows = fetch_forex_candles(
+            symbol=symbol,
+            interval=interval,
+            outputsize=outputsize,
+        )
+    except MarketDataError as exc:
+        logger.warning("Market data error: %s", exc)
+        raise HTTPException(
+            status_code=502,
+            detail="Market data provider could not supply the requested data.",
+        ) from exc
+    except Exception as exc:
+        logger.exception("Unexpected market data error")
+        raise HTTPException(
+            status_code=502,
+            detail="Unexpected market data provider error.",
+        ) from exc
+
+    return {
+        "symbol": symbol.upper(),
+        "interval": interval,
+        "count": len(rows),
+        "candles": rows,
         "live_execution_enabled": LIVE_EXECUTION_ENABLED,
     }
 
 
-# --------------------------------------------------
-# ACCOUNT
-# --------------------------------------------------
-
-@router.get("/account", response_model=AccountResponse)
-async def get_account(
-    account: CurrentAccount,
-):
-    return account
-
-
-# --------------------------------------------------
-# RISK CALCULATION
-# --------------------------------------------------
-
-@router.post(
-    "/risk/calculate",
-    response_model=RiskCalculationResponse,
-)
-async def calculate_risk(
-    request: RiskCalculationRequest,
-):
-    try:
-        result = calculate_position_size(
-            account_balance=request.account_balance,
-            risk_percent=request.risk_percent,
-            entry_price=request.entry_price,
-            stop_loss=request.stop_loss,
-            value_per_price_unit=request.value_per_price_unit,
-        )
-
-        return result
-
-    except RiskValidationError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        ) from exc
-
-    except (ValueError, ArithmeticError) as exc:
-        raise HTTPException(
-            status_code=400,
-            detail="Unable to calculate position size from the supplied values.",
-        ) from exc
-
-
-# --------------------------------------------------
-# SIMULATED ORDER CREATION
-# --------------------------------------------------
-
-@router.post(
-    "/orders",
-    response_model=OrderResponse,
-)
-async def create_order(
-    request: OrderCreateRequest,
-    account: CurrentAccount,
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Creates a simulated order only.
-    This endpoint does not send orders to LiteFinance.
-    """
-
-    try:
-        async with db.begin():
-            order = await OrderService.create_simulated_order(
-                db=db,
-                account_id=account.id,
-                request=request,
-            )
-
-        return order
-
-    except DuplicateOrderConflict as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=str(exc),
-        ) from exc
-
-    except OrderServiceError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        ) from exc
-
-
-# --------------------------------------------------
-# SIGNAL ANALYSIS REQUEST
-# --------------------------------------------------
-
-class SignalAnalysisRequest(BaseModel):
-    symbol: str = Field(
-        min_length=3,
-        max_length=32,
-    )
-
-    candles: list[Candle] = Field(
-        min_length=60,
-        max_length=5000,
-    )
-
-    account_balance: Decimal = Field(
-        gt=0,
-    )
-
-    risk_percent: Decimal = Field(
-        gt=0,
-        le=5,
-    )
-
-    value_per_price_unit: Decimal = Field(
-        gt=0,
-    )
-
-
-# --------------------------------------------------
-# ANALYZE SUPPLIED MARKET CANDLES
-# --------------------------------------------------
-
 @router.post("/signals/analyze")
-async def analyze_signal(
+def analyze_single_timeframe(
     request: SignalAnalysisRequest,
-):
-    """
-    Analyzes candle data supplied by the client.
-
-    This endpoint generates analysis only.
-    It does not execute a trade.
-    """
-
-    symbol = request.symbol.strip().upper().replace("-", "/")
-
-    if not symbol:
-        raise HTTPException(
-            status_code=400,
-            detail="A valid trading symbol is required.",
-        )
+) -> dict[str, Any]:
+    candles = _to_candles(request.candles)
 
     try:
         result = analyze_market(
-            candles=request.candles,
+            candles=candles,
             account_balance=request.account_balance,
             risk_percent=request.risk_percent,
             value_per_price_unit=request.value_per_price_unit,
+            risk_reward_ratio=request.risk_reward_ratio,
+            symbol=request.symbol,
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-        return {
-            "symbol": symbol,
-            "signal": result["signal"],
-            "score": result["score"],
-            "entry": result["entry"],
-            "stop_loss": result["stop_loss"],
-            "take_profit": result["take_profit"],
-            "quantity": result["quantity"],
-            "risk_amount": result["risk_amount"],
-            "reasons": result["reasons"],
-            "live_market_data": LIVE_MARKET_DATA_ENABLED,
-            "live_execution_enabled": LIVE_EXECUTION_ENABLED,
+    return {
+        "signal": result_to_dict(result),
+        "live_execution_enabled": LIVE_EXECUTION_ENABLED,
+        "execution_note": "This endpoint generates analysis only; it does not place orders.",
+    }
+
+
+@router.post("/signals/analyze-multi-timeframe")
+def analyze_multi_timeframe_signal(
+    request: MultiTimeframeSignalRequest,
+) -> dict[str, Any]:
+    symbol = request.symbol.upper()
+
+    if request.mode == "day_trading":
+        intervals = {
+            "4h": "4h",
+            "1h": "1h",
+            "15min": "15min",
+        }
+    elif request.mode == "scalping":
+        intervals = {
+            "1h": "1h",
+            "15min": "15min",
+            "5min": "5min",
+        }
+    else:
+        intervals = {
+            "4h": "4h",
+            "1h": "1h",
+            "15min": "15min",
+            "5min": "5min",
         }
 
-    except RiskValidationError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        ) from exc
+    market_data: dict[str, list[Candle]] = {}
+    data_counts: dict[str, int] = {}
 
-    except (ValueError, ArithmeticError) as exc:
-        raise HTTPException(
-            status_code=400,
-            detail="Signal analysis failed because of invalid input data.",
-        ) from exc
-
-
-# --------------------------------------------------
-# MARKET DATA
-# --------------------------------------------------
-
-@router.get("/market-data/{symbol}")
-async def get_market_data(
-    symbol: str,
-    interval: Literal[
-        "1min",
-        "5min",
-        "15min",
-        "30min",
-        "1h",
-        "4h",
-        "1day",
-    ] = Query(default="1h"),
-    outputsize: int = Query(
-        default=100,
-        ge=60,
-        le=5000,
-    ),
-):
-    """
-    Retrieves historical candle data from the configured
-    market-data provider.
-
-    TWELVEDATA_API_KEY must be configured on the server.
-    """
-
-    normalized_symbol = symbol.strip().upper().replace("-", "/")
-
-    if not normalized_symbol:
-        raise HTTPException(
-            status_code=400,
-            detail="A valid trading symbol is required.",
-        )
+    for timeframe, provider_interval in intervals.items():
+        rows = _fetch(symbol, provider_interval)
+        market_data[timeframe] = _to_candles(rows)
+        data_counts[timeframe] = len(rows)
 
     try:
-        candles = await fetch_forex_candles(
-            symbol=normalized_symbol,
-            interval=interval,
-            outputsize=outputsize,
+        result = analyze_multi_timeframe(
+            market_data=market_data,
+            mode=request.mode,
+            account_balance=request.account_balance,
+            risk_percent=request.risk_percent,
+            value_per_price_unit=request.value_per_price_unit,
+            risk_reward_ratio=request.risk_reward_ratio,
+            symbol=symbol,
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-        # market_data.py returns dictionaries, not Candle objects.
-        formatted_candles = [
-            {
-                "open": candle["open"],
-                "high": candle["high"],
-                "low": candle["low"],
-                "close": candle["close"],
-            }
-            for candle in candles
-        ]
+    return {
+        "symbol": symbol,
+        "requested_mode": request.mode,
+        "signal": result_to_dict(result),
+        "market_data": {
+            "status": "received",
+            "candles_per_timeframe": data_counts,
+        },
+        "live_execution_enabled": LIVE_EXECUTION_ENABLED,
+        "execution_note": (
+            "Analysis only. No broker orders are placed. "
+            "Verify broker contract specifications before relying on position sizing."
+        ),
+    }
 
-        return {
-            "symbol": normalized_symbol,
-            "interval": interval,
-            "count": len(formatted_candles),
-            "candles": formatted_candles,
-            "live_market_data": True,
-            "live_execution_enabled": LIVE_EXECUTION_ENABLED,
-        }
-
-    except MarketDataError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=str(exc),
-        ) from exc
-
-    except (KeyError, TypeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=502,
-            detail="The market-data provider returned an invalid candle format.",
-        ) from exc
-
-
-# --------------------------------------------------
-# LIVE SIGNAL ENDPOINT
-# --------------------------------------------------
 
 @router.get("/signals/live/{symbol}")
-async def get_live_signal(
-    symbol: str,
-    interval: Literal[
-        "1min",
-        "5min",
-        "15min",
-        "30min",
-        "1h",
-        "4h",
-        "1day",
-    ] = Query(default="1h"),
-    outputsize: int = Query(
-        default=100,
-        ge=60,
-        le=5000,
-    ),
-):
-    """
-    Retrieves market candles.
+def live_signal_status(symbol: str) -> dict[str, Any]:
+    return {
+        "symbol": symbol.upper(),
+        "status": "analysis_endpoint_required",
+        "message": (
+            "Use POST /signals/analyze-multi-timeframe with a selected mode, "
+            "account balance, risk percentage, and verified contract value."
+        ),
+        "live_execution_enabled": LIVE_EXECUTION_ENABLED,
+    }
 
-    Signal generation remains unavailable here until the
-    instrument's contract specifications and price-value
-    calculations have been validated.
-    """
 
-    normalized_symbol = symbol.strip().upper().replace("-", "/")
+@router.get("/account")
+def account_status() -> dict[str, Any]:
+    return {
+        "account_balance": 1000.0,
+        "currency": "USD",
+        "mode": "analysis_only",
+        "live_execution_enabled": LIVE_EXECUTION_ENABLED,
+    }
 
-    if not normalized_symbol:
-        raise HTTPException(
-            status_code=400,
-            detail="A valid trading symbol is required.",
-        )
 
-    try:
-        candles = await fetch_forex_candles(
-            symbol=normalized_symbol,
-            interval=interval,
-            outputsize=outputsize,
-        )
+@router.post("/risk/calculate")
+def calculate_risk(
+    account_balance: float = Query(..., gt=0),
+    risk_percent: float = Query(0.5, gt=0, le=1),
+    stop_distance: float = Query(..., gt=0),
+    value_per_price_unit: float = Query(..., gt=0),
+) -> dict[str, Any]:
+    risk_amount = account_balance * risk_percent / 100.0
+    position_size = risk_amount / (
+        stop_distance * value_per_price_unit
+    )
 
-    except MarketDataError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=str(exc),
-        ) from exc
+    return {
+        "account_balance": account_balance,
+        "risk_percent": risk_percent,
+        "risk_amount": round(risk_amount, 2),
+        "stop_distance": stop_distance,
+        "estimated_position_size": round(position_size, 4),
+        "live_execution_enabled": LIVE_EXECUTION_ENABLED,
+        "warning": (
+            "Estimate only. Confirm contract size, tick value, account currency, "
+            "spread, commission, and broker minimum lot size."
+        ),
+    }
 
-    if len(candles) < 60:
-        raise HTTPException(
-            status_code=422,
-            detail="At least 60 valid candles are required for analysis.",
-        )
 
+@router.post("/orders")
+def simulated_order_status() -> dict[str, Any]:
     raise HTTPException(
-        status_code=501,
-        detail={
-            "message": (
-                "Live signal generation is not yet enabled for this endpoint. "
-                "Instrument specifications and position-sizing calculations "
-                "must be validated first."
-            ),
-            "symbol": normalized_symbol,
-            "candles_received": len(candles),
-            "live_execution_enabled": False,
-        },
+        status_code=403,
+        detail="Live and simulated order submission are disabled in this API.",
     )
