@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Literal
 
@@ -24,6 +25,28 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["SignalPilot Pro"])
 
 LIVE_EXECUTION_ENABLED = False
+
+# Maximum number of simultaneous requests to Twelve Data.
+SCAN_CONCURRENCY = 2
+
+# Supported forex scanning instruments.
+SUPPORTED_SCAN_SYMBOLS = {
+    "EUR/USD",
+    "GBP/USD",
+    "USD/JPY",
+    "USD/CHF",
+    "USD/CAD",
+    "AUD/USD",
+    "NZD/USD",
+    "EUR/GBP",
+    "EUR/JPY",
+    "GBP/JPY",
+    "EUR/AUD",
+    "GBP/AUD",
+    "AUD/JPY",
+    "GBP/CHF",
+    "CAD/JPY",
+}
 
 
 # =====================================================
@@ -53,6 +76,37 @@ class MultiTimeframeSignalRequest(BaseModel):
     risk_percent: float = Field(0.5, gt=0, le=1)
     value_per_price_unit: float = Field(..., gt=0)
     risk_reward_ratio: float = Field(2.0, ge=1)
+
+
+class MarketScanRequest(BaseModel):
+    symbols: list[str] = Field(
+        default_factory=lambda: [
+            "EURUSD",
+            "GBPUSD",
+            "USDJPY",
+            "USDCHF",
+            "USDCAD",
+        ],
+        min_length=1,
+        max_length=15,
+    )
+
+    mode: Literal[
+        "day_trading",
+        "scalping",
+        "smart_adaptive",
+    ] = "smart_adaptive"
+
+    account_balance: float = Field(1000.0, gt=0)
+    risk_percent: float = Field(0.5, gt=0, le=1)
+    value_per_price_unit: float = Field(..., gt=0)
+    risk_reward_ratio: float = Field(2.0, ge=1)
+
+    minimum_score: int = Field(
+        60,
+        ge=60,
+        le=100,
+    )
 
 
 # =====================================================
@@ -101,7 +155,10 @@ def _to_candles(
         except (KeyError, TypeError, ValueError) as exc:
             raise HTTPException(
                 status_code=502,
-                detail="Invalid candle returned by market-data provider.",
+                detail=(
+                    "Invalid candle returned "
+                    "by market-data provider."
+                ),
             ) from exc
 
     return candles
@@ -149,6 +206,32 @@ async def _fetch(
     return rows
 
 
+def _timeframes_for_mode(
+    mode: str,
+) -> dict[str, str]:
+
+    if mode == "day_trading":
+        return {
+            "4h": "4h",
+            "1h": "1h",
+            "15min": "15min",
+        }
+
+    if mode == "scalping":
+        return {
+            "1h": "1h",
+            "15min": "15min",
+            "5min": "5min",
+        }
+
+    return {
+        "4h": "4h",
+        "1h": "1h",
+        "15min": "15min",
+        "5min": "5min",
+    }
+
+
 # =====================================================
 # HEALTH CHECK
 # =====================================================
@@ -163,6 +246,7 @@ async def health():
         "status": "ok",
         "service": "SignalPilot Pro",
         "live_market_analysis": True,
+        "multi_market_scanner": True,
         "live_execution_enabled": False,
     }
 
@@ -214,7 +298,7 @@ async def get_market_data(
         "interval": interval,
         "count": len(rows),
         "candles": rows,
-        "live_market_data": True,
+        "market_data_available": True,
         "live_execution_enabled": False,
     }
 
@@ -277,30 +361,7 @@ async def analyze_multi_timeframe_signal(
 
     symbol = _normalize_market_symbol(request.symbol)
 
-    if request.mode == "day_trading":
-
-        intervals = {
-            "4h": "4h",
-            "1h": "1h",
-            "15min": "15min",
-        }
-
-    elif request.mode == "scalping":
-
-        intervals = {
-            "1h": "1h",
-            "15min": "15min",
-            "5min": "5min",
-        }
-
-    else:
-
-        intervals = {
-            "4h": "4h",
-            "1h": "1h",
-            "15min": "15min",
-            "5min": "5min",
-        }
+    intervals = _timeframes_for_mode(request.mode)
 
     market_data: dict[str, list[Candle]] = {}
     counts: dict[str, int] = {}
@@ -341,13 +402,242 @@ async def analyze_multi_timeframe_signal(
             "status": "received",
             "candles_per_timeframe": counts,
         },
-        "live_market_data": True,
+        "market_data_available": True,
         "live_execution_enabled": False,
         "execution_note": (
             "Technical analysis only. "
             "No broker orders are placed. "
             "Position sizing is an estimate pending "
             "verification of broker specifications."
+        ),
+    }
+
+
+# =====================================================
+# MULTI-MARKET SCANNER
+# =====================================================
+
+@router.post(
+    "/signals/scan",
+    summary="Scan and Rank Multiple Forex Markets",
+    description=(
+        "Scans supported forex instruments, "
+        "analyzes multiple timeframes and ranks "
+        "qualifying trading opportunities."
+    ),
+)
+async def scan_markets(
+    request: MarketScanRequest,
+):
+
+    # Normalize instruments.
+    symbols = [
+        _normalize_market_symbol(symbol)
+        for symbol in request.symbols
+    ]
+
+    # Reject duplicates.
+    if len(set(symbols)) != len(symbols):
+        raise HTTPException(
+            status_code=422,
+            detail="Duplicate symbols are not allowed.",
+        )
+
+    # Reject unsupported instruments.
+    unsupported = [
+        symbol
+        for symbol in symbols
+        if symbol not in SUPPORTED_SCAN_SYMBOLS
+    ]
+
+    if unsupported:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Unsupported scanning instruments.",
+                "unsupported_symbols": unsupported,
+                "supported_symbols": sorted(
+                    SUPPORTED_SCAN_SYMBOLS
+                ),
+            },
+        )
+
+    semaphore = asyncio.Semaphore(SCAN_CONCURRENCY)
+
+    intervals = _timeframes_for_mode(request.mode)
+
+    async def scan_one_market(symbol: str):
+
+        market_data: dict[str, list[Candle]] = {}
+        counts: dict[str, int] = {}
+
+        try:
+
+            # Retrieve candles for the requested timeframes.
+            for timeframe, interval in intervals.items():
+
+                async with semaphore:
+                    rows = await _fetch(
+                        symbol,
+                        interval,
+                    )
+
+                candles = _to_candles(rows)
+
+                market_data[timeframe] = candles
+                counts[timeframe] = len(candles)
+
+            # Run the existing analysis engine.
+            result = analyze_multi_timeframe(
+                market_data=market_data,
+                mode=request.mode,
+                account_balance=request.account_balance,
+                risk_percent=request.risk_percent,
+                value_per_price_unit=request.value_per_price_unit,
+                risk_reward_ratio=request.risk_reward_ratio,
+                symbol=symbol,
+            )
+
+            result_dict = result_to_dict(result)
+
+            # Apply minimum-score filter.
+            if (
+                result_dict["signal"] != "NO_TRADE"
+                and result_dict["score"] < request.minimum_score
+            ):
+
+                result_dict["signal"] = "NO_TRADE"
+                result_dict["position_size"] = 0
+                result_dict["risk_amount"] = 0
+
+                result_dict["stop_loss"] = (
+                    result_dict["entry_price"]
+                )
+
+                result_dict["take_profit"] = (
+                    result_dict["entry_price"]
+                )
+
+                result_dict["reasons"].append(
+                    "Signal rejected by scanner minimum-score filter."
+                )
+
+            return {
+                "symbol": symbol,
+                "status": "analyzed",
+                "signal": result_dict,
+                "candles_per_timeframe": counts,
+            }
+
+        except (HTTPException, ValueError) as exc:
+
+            logger.warning(
+                "Scanner could not analyze %s: %s",
+                symbol,
+                str(exc),
+            )
+
+            return {
+                "symbol": symbol,
+                "status": "failed",
+                "error": (
+                    exc.detail
+                    if isinstance(exc, HTTPException)
+                    else str(exc)
+                ),
+            }
+
+        except Exception:
+
+            logger.exception(
+                "Unexpected scanner error for %s",
+                symbol,
+            )
+
+            return {
+                "symbol": symbol,
+                "status": "failed",
+                "error": "Unexpected analysis error.",
+            }
+
+    # Run market scans concurrently.
+    results = await asyncio.gather(
+        *[
+            scan_one_market(symbol)
+            for symbol in symbols
+        ]
+    )
+
+    # Separate successful analyses.
+    analyzed = [
+        item
+        for item in results
+        if item["status"] == "analyzed"
+    ]
+
+    # Select BUY and SELL opportunities.
+    opportunities = [
+        item
+        for item in analyzed
+        if item["signal"]["signal"] in ("BUY", "SELL")
+    ]
+
+    # Select NO_TRADE markets.
+    rejected = [
+        item
+        for item in analyzed
+        if item["signal"]["signal"] == "NO_TRADE"
+    ]
+
+    # Select failed markets.
+    failed = [
+        item
+        for item in results
+        if item["status"] == "failed"
+    ]
+
+    # Rank strongest signals first.
+    opportunities.sort(
+        key=lambda item: item["signal"]["score"],
+        reverse=True,
+    )
+
+    ranked_opportunities = [
+        {
+            "rank": index + 1,
+            **item,
+        }
+        for index, item in enumerate(opportunities)
+    ]
+
+    return {
+        "application": "SignalPilot Pro",
+        "scanner": "multi_market",
+        "requested_mode": request.mode,
+
+        "markets_requested": len(symbols),
+        "markets_analyzed": len(analyzed),
+        "opportunities_found": len(opportunities),
+        "markets_rejected": len(rejected),
+        "markets_failed": len(failed),
+
+        "minimum_score": request.minimum_score,
+
+        "ranked_opportunities": ranked_opportunities,
+
+        "no_trade_markets": rejected,
+
+        "failed_markets": failed,
+
+        "market_data_available": len(analyzed) > 0,
+
+        "live_execution_enabled": False,
+
+        "note": (
+            "Technical analysis only. No broker orders "
+            "are placed. Scores are not probabilities "
+            "of winning. Position sizing is provisional "
+            "and requires verified broker specifications."
         ),
     }
 
@@ -369,7 +659,7 @@ async def live_signal_status(
         "status": "analysis_endpoint_required",
         "message": (
             "Use POST /signals/analyze-multi-timeframe "
-            "to request technical analysis."
+            "or POST /signals/scan to request analysis."
         ),
         "live_execution_enabled": False,
     }
