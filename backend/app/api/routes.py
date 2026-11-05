@@ -31,44 +31,17 @@ LIVE_EXECUTION_ENABLED = False
 # =====================================================
 
 class SignalAnalysisRequest(BaseModel):
-
-    symbol: str = Field(
-        ...,
-        min_length=3,
-        max_length=20,
-    )
-
+    symbol: str = Field(..., min_length=3, max_length=20)
     candles: list[dict[str, Any]]
 
-    account_balance: float = Field(
-        1000.0,
-        gt=0,
-    )
-
-    risk_percent: float = Field(
-        0.5,
-        gt=0,
-        le=1,
-    )
-
-    value_per_price_unit: float = Field(
-        ...,
-        gt=0,
-    )
-
-    risk_reward_ratio: float = Field(
-        2.0,
-        ge=1,
-    )
+    account_balance: float = Field(1000.0, gt=0)
+    risk_percent: float = Field(0.5, gt=0, le=1)
+    value_per_price_unit: float = Field(..., gt=0)
+    risk_reward_ratio: float = Field(2.0, ge=1)
 
 
 class MultiTimeframeSignalRequest(BaseModel):
-
-    symbol: str = Field(
-        ...,
-        min_length=3,
-        max_length=20,
-    )
+    symbol: str = Field(..., min_length=3, max_length=20)
 
     mode: Literal[
         "day_trading",
@@ -76,31 +49,37 @@ class MultiTimeframeSignalRequest(BaseModel):
         "smart_adaptive",
     ] = "smart_adaptive"
 
-    account_balance: float = Field(
-        1000.0,
-        gt=0,
-    )
-
-    risk_percent: float = Field(
-        0.5,
-        gt=0,
-        le=1,
-    )
-
-    value_per_price_unit: float = Field(
-        ...,
-        gt=0,
-    )
-
-    risk_reward_ratio: float = Field(
-        2.0,
-        ge=1,
-    )
+    account_balance: float = Field(1000.0, gt=0)
+    risk_percent: float = Field(0.5, gt=0, le=1)
+    value_per_price_unit: float = Field(..., gt=0)
+    risk_reward_ratio: float = Field(2.0, ge=1)
 
 
 # =====================================================
 # HELPER FUNCTIONS
 # =====================================================
+
+def _normalize_market_symbol(symbol: str) -> str:
+    """
+    Convert common six-letter forex symbols into
+    the slash-separated format expected by Twelve Data.
+
+    EURUSD becomes EUR/USD.
+    GBPJPY becomes GBP/JPY.
+    EUR/USD remains EUR/USD.
+    """
+
+    symbol = symbol.strip().upper().replace("-", "/")
+
+    if (
+        "/" not in symbol
+        and len(symbol) == 6
+        and symbol.isalpha()
+    ):
+        symbol = f"{symbol[:3]}/{symbol[3:]}"
+
+    return symbol
+
 
 def _to_candles(
     rows: list[dict[str, Any]],
@@ -109,9 +88,7 @@ def _to_candles(
     candles: list[Candle] = []
 
     for row in rows:
-
         try:
-
             candles.append(
                 Candle(
                     open=float(row["open"]),
@@ -122,7 +99,6 @@ def _to_candles(
             )
 
         except (KeyError, TypeError, ValueError) as exc:
-
             raise HTTPException(
                 status_code=502,
                 detail="Invalid candle returned by market-data provider.",
@@ -136,31 +112,38 @@ async def _fetch(
     interval: str,
 ) -> list[dict[str, Any]]:
 
-    try:
+    normalized_symbol = _normalize_market_symbol(symbol)
 
+    try:
         rows = await fetch_forex_candles(
-            symbol=symbol,
+            symbol=normalized_symbol,
             interval=interval,
             outputsize=120,
         )
 
     except MarketDataError as exc:
-
         logger.warning(
-            "Market data unavailable: %s",
+            "Market data unavailable for %s (%s): %s",
+            normalized_symbol,
+            interval,
             exc,
         )
 
         raise HTTPException(
             status_code=502,
-            detail=f"Market data unavailable for {symbol} ({interval}).",
+            detail=(
+                f"Market data unavailable for "
+                f"{normalized_symbol} ({interval})."
+            ),
         ) from exc
 
     if len(rows) < 60:
-
         raise HTTPException(
             status_code=502,
-            detail=f"Insufficient candle history for {symbol} ({interval}).",
+            detail=(
+                f"Insufficient candle history for "
+                f"{normalized_symbol} ({interval})."
+            ),
         )
 
     return rows
@@ -202,28 +185,32 @@ async def get_market_data(
     ),
 ):
 
-    try:
+    normalized_symbol = _normalize_market_symbol(symbol)
 
+    try:
         rows = await fetch_forex_candles(
-            symbol=symbol,
+            symbol=normalized_symbol,
             interval=interval,
             outputsize=outputsize,
         )
 
     except MarketDataError as exc:
-
         logger.warning(
-            "Market data request failed: %s",
+            "Market data request failed for %s: %s",
+            normalized_symbol,
             exc,
         )
 
         raise HTTPException(
             status_code=502,
-            detail="Market-data provider could not supply the requested data.",
+            detail=(
+                "Market-data provider could not "
+                "supply the requested data."
+            ),
         ) from exc
 
     return {
-        "symbol": symbol.upper(),
+        "symbol": normalized_symbol,
         "interval": interval,
         "count": len(rows),
         "candles": rows,
@@ -247,7 +234,6 @@ async def analyze_single_timeframe(
     candles = _to_candles(request.candles)
 
     try:
-
         result = analyze_market(
             candles=candles,
             account_balance=request.account_balance,
@@ -258,7 +244,6 @@ async def analyze_single_timeframe(
         )
 
     except ValueError as exc:
-
         raise HTTPException(
             status_code=422,
             detail=str(exc),
@@ -268,7 +253,9 @@ async def analyze_single_timeframe(
         "symbol": request.symbol.upper(),
         "signal": result_to_dict(result),
         "live_execution_enabled": False,
-        "execution_note": "Analysis only. No broker orders are placed.",
+        "execution_note": (
+            "Analysis only. No broker orders are placed."
+        ),
     }
 
 
@@ -288,9 +275,7 @@ async def analyze_multi_timeframe_signal(
     request: MultiTimeframeSignalRequest,
 ):
 
-    symbol = request.symbol.upper()
-
-    # Select timeframes.
+    symbol = _normalize_market_symbol(request.symbol)
 
     if request.mode == "day_trading":
 
@@ -318,10 +303,7 @@ async def analyze_multi_timeframe_signal(
         }
 
     market_data: dict[str, list[Candle]] = {}
-
     counts: dict[str, int] = {}
-
-    # Retrieve market data.
 
     for timeframe, interval in intervals.items():
 
@@ -331,13 +313,9 @@ async def analyze_multi_timeframe_signal(
         )
 
         market_data[timeframe] = _to_candles(rows)
-
         counts[timeframe] = len(rows)
 
-    # Run the analysis engine.
-
     try:
-
         result = analyze_multi_timeframe(
             market_data=market_data,
             mode=request.mode,
@@ -349,7 +327,6 @@ async def analyze_multi_timeframe_signal(
         )
 
     except ValueError as exc:
-
         raise HTTPException(
             status_code=422,
             detail=str(exc),
@@ -357,22 +334,15 @@ async def analyze_multi_timeframe_signal(
 
     return {
         "application": "SignalPilot Pro",
-
         "symbol": symbol,
-
         "requested_mode": request.mode,
-
         "signal": result_to_dict(result),
-
         "market_data": {
             "status": "received",
             "candles_per_timeframe": counts,
         },
-
         "live_market_data": True,
-
         "live_execution_enabled": False,
-
         "execution_note": (
             "Technical analysis only. "
             "No broker orders are placed. "
@@ -395,15 +365,12 @@ async def live_signal_status(
 ):
 
     return {
-        "symbol": symbol.upper(),
-
+        "symbol": _normalize_market_symbol(symbol),
         "status": "analysis_endpoint_required",
-
         "message": (
             "Use POST /signals/analyze-multi-timeframe "
             "to request technical analysis."
         ),
-
         "live_execution_enabled": False,
     }
 
@@ -458,20 +425,14 @@ async def calculate_risk(
 
     return {
         "account_balance": account_balance,
-
         "risk_percent": risk_percent,
-
         "risk_amount": round(risk_amount, 2),
-
         "stop_distance": stop_distance,
-
         "estimated_position_size": round(
             position_size,
             4,
         ),
-
         "live_execution_enabled": False,
-
         "warning": (
             "Estimate only. Confirm contract size, "
             "tick value, account currency, spread, "
