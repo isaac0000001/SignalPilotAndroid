@@ -4,7 +4,8 @@ from fastapi import FastAPI
 
 from app.config import get_settings
 from app.database import close_database
-from app.api.routes import router
+from app.api.routes import router as main_router
+from app.api.automation import router as automation_router
 
 
 settings = get_settings()
@@ -27,7 +28,12 @@ app = FastAPI(
 )
 
 app.include_router(
-    router,
+    main_router,
+    prefix=settings.API_PREFIX,
+)
+
+app.include_router(
+    automation_router,
     prefix=settings.API_PREFIX,
 )
 
