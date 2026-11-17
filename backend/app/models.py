@@ -7,6 +7,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    JSON,
     Numeric,
     String,
     Text,
@@ -14,6 +15,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.types import Uuid
 
 from app.database import Base
 
@@ -304,4 +306,111 @@ class AuditEvent(Base):
         DateTime(timezone=True),
         nullable=False,
         default=utc_now,
+    )
+
+
+class ScanRun(Base):
+    """
+    Stores the results and execution history of each market scan.
+    This model does not execute or submit broker orders.
+    """
+
+    __tablename__ = "scan_runs"
+
+    __table_args__ = (
+        Index("ix_scan_runs_started_at", "started_at"),
+        Index("ix_scan_runs_status", "status"),
+    )
+
+    id: Mapped[uuid4] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="RUNNING",
+    )
+
+    mode: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default="day_trading",
+    )
+
+    symbols: Mapped[list] = mapped_column(
+        JSON,
+        nullable=False,
+    )
+
+    timeframes: Mapped[list] = mapped_column(
+        JSON,
+        nullable=False,
+    )
+
+    account_balance: Mapped[Decimal] = mapped_column(
+        Numeric(20, 8),
+        nullable=False,
+        default=Decimal("1000"),
+    )
+
+    risk_percent: Mapped[Decimal] = mapped_column(
+        Numeric(8, 4),
+        nullable=False,
+        default=Decimal("0.5"),
+    )
+
+    risk_reward_ratio: Mapped[Decimal] = mapped_column(
+        Numeric(8, 4),
+        nullable=False,
+        default=Decimal("2"),
+    )
+
+    minimum_score: Mapped[int] = mapped_column(
+        nullable=False,
+        default=60,
+    )
+
+    markets_requested: Mapped[int] = mapped_column(
+        nullable=False,
+        default=0,
+    )
+
+    markets_analyzed: Mapped[int] = mapped_column(
+        nullable=False,
+        default=0,
+    )
+
+    opportunities_found: Mapped[int] = mapped_column(
+        nullable=False,
+        default=0,
+    )
+
+    markets_failed: Mapped[int] = mapped_column(
+        nullable=False,
+        default=0,
+    )
+
+    results: Mapped[dict] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+    )
+
+    error_message: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+    )
+
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )
