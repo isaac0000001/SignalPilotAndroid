@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from decimal import Decimal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import (
     Boolean,
@@ -13,7 +13,6 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import Uuid
 
@@ -28,50 +27,32 @@ class Account(Base):
     __tablename__ = "accounts"
 
     id: Mapped[UUID] = mapped_column(
-        UUID(as_uuid=True),
+        Uuid(as_uuid=True),
         primary_key=True,
         default=uuid4,
     )
-
     name: Mapped[str] = mapped_column(
-        String(100),
-        nullable=False,
+        String(100), nullable=False,
         default="Personal Trading Account",
     )
-
     currency: Mapped[str] = mapped_column(
-        String(3),
-        nullable=False,
-        default="USD",
+        String(3), nullable=False, default="USD",
     )
-
     initial_balance: Mapped[Decimal] = mapped_column(
-        Numeric(20, 8),
-        nullable=False,
+        Numeric(20, 8), nullable=False,
     )
-
     balance: Mapped[Decimal] = mapped_column(
-        Numeric(20, 8),
-        nullable=False,
+        Numeric(20, 8), nullable=False,
     )
-
     equity: Mapped[Decimal] = mapped_column(
-        Numeric(20, 8),
-        nullable=False,
+        Numeric(20, 8), nullable=False,
     )
-
     is_active: Mapped[bool] = mapped_column(
-        Boolean,
-        nullable=False,
-        default=True,
+        Boolean, nullable=False, default=True,
     )
-
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        default=utc_now,
+        DateTime(timezone=True), nullable=False, default=utc_now,
     )
-
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -82,7 +63,6 @@ class Account(Base):
     orders: Mapped[list["Order"]] = relationship(
         back_populates="account",
     )
-
     positions: Mapped[list["Position"]] = relationship(
         back_populates="account",
     )
@@ -102,75 +82,46 @@ class Order(Base):
     )
 
     id: Mapped[UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid4,
+        Uuid(as_uuid=True), primary_key=True, default=uuid4,
     )
-
     account_id: Mapped[UUID] = mapped_column(
-        UUID(as_uuid=True),
+        Uuid(as_uuid=True),
         ForeignKey("accounts.id", ondelete="RESTRICT"),
         nullable=False,
     )
-
     client_order_id: Mapped[str] = mapped_column(
-        String(100),
-        nullable=False,
+        String(100), nullable=False,
     )
-
     symbol: Mapped[str] = mapped_column(
-        String(32),
-        nullable=False,
+        String(32), nullable=False,
     )
-
     side: Mapped[str] = mapped_column(
-        String(10),
-        nullable=False,
+        String(10), nullable=False,
     )
-
     order_type: Mapped[str] = mapped_column(
-        String(20),
-        nullable=False,
+        String(20), nullable=False,
     )
-
     quantity: Mapped[Decimal] = mapped_column(
-        Numeric(24, 8),
-        nullable=False,
+        Numeric(24, 8), nullable=False,
     )
-
     requested_price: Mapped[Decimal | None] = mapped_column(
-        Numeric(24, 10),
-        nullable=True,
+        Numeric(24, 10), nullable=True,
     )
-
     filled_price: Mapped[Decimal | None] = mapped_column(
-        Numeric(24, 10),
-        nullable=True,
+        Numeric(24, 10), nullable=True,
     )
-
     status: Mapped[str] = mapped_column(
-        String(20),
-        nullable=False,
-        default="PENDING",
+        String(20), nullable=False, default="PENDING",
     )
-
     execution_mode: Mapped[str] = mapped_column(
-        String(20),
-        nullable=False,
-        default="SIMULATED",
+        String(20), nullable=False, default="SIMULATED",
     )
-
     rejection_reason: Mapped[str | None] = mapped_column(
-        Text,
-        nullable=True,
+        Text, nullable=True,
     )
-
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        default=utc_now,
+        DateTime(timezone=True), nullable=False, default=utc_now,
     )
-
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -192,74 +143,47 @@ class Position(Base):
     )
 
     id: Mapped[UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid4,
+        Uuid(as_uuid=True), primary_key=True, default=uuid4,
     )
-
     account_id: Mapped[UUID] = mapped_column(
-        UUID(as_uuid=True),
+        Uuid(as_uuid=True),
         ForeignKey("accounts.id", ondelete="RESTRICT"),
         nullable=False,
     )
-
     order_id: Mapped[UUID | None] = mapped_column(
-        UUID(as_uuid=True),
+        Uuid(as_uuid=True),
         ForeignKey("orders.id", ondelete="RESTRICT"),
         nullable=True,
     )
-
     symbol: Mapped[str] = mapped_column(
-        String(32),
-        nullable=False,
+        String(32), nullable=False,
     )
-
     side: Mapped[str] = mapped_column(
-        String(10),
-        nullable=False,
+        String(10), nullable=False,
     )
-
     quantity: Mapped[Decimal] = mapped_column(
-        Numeric(24, 8),
-        nullable=False,
+        Numeric(24, 8), nullable=False,
     )
-
     entry_price: Mapped[Decimal] = mapped_column(
-        Numeric(24, 10),
-        nullable=False,
+        Numeric(24, 10), nullable=False,
     )
-
     stop_loss: Mapped[Decimal | None] = mapped_column(
-        Numeric(24, 10),
-        nullable=True,
+        Numeric(24, 10), nullable=True,
     )
-
     take_profit: Mapped[Decimal | None] = mapped_column(
-        Numeric(24, 10),
-        nullable=True,
+        Numeric(24, 10), nullable=True,
     )
-
     realized_pnl: Mapped[Decimal] = mapped_column(
-        Numeric(20, 8),
-        nullable=False,
-        default=Decimal("0"),
+        Numeric(20, 8), nullable=False, default=Decimal("0"),
     )
-
     status: Mapped[str] = mapped_column(
-        String(20),
-        nullable=False,
-        default="OPEN",
+        String(20), nullable=False, default="OPEN",
     )
-
     opened_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        default=utc_now,
+        DateTime(timezone=True), nullable=False, default=utc_now,
     )
-
     closed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
+        DateTime(timezone=True), nullable=True,
     )
 
     account: Mapped["Account"] = relationship(
@@ -276,45 +200,26 @@ class AuditEvent(Base):
     )
 
     id: Mapped[UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid4,
+        Uuid(as_uuid=True), primary_key=True, default=uuid4,
     )
-
     event_type: Mapped[str] = mapped_column(
-        String(100),
-        nullable=False,
+        String(100), nullable=False,
     )
-
     actor: Mapped[str] = mapped_column(
-        String(100),
-        nullable=False,
-        default="system",
+        String(100), nullable=False, default="system",
     )
-
     resource_id: Mapped[str | None] = mapped_column(
-        String(100),
-        nullable=True,
+        String(100), nullable=True,
     )
-
     details: Mapped[str | None] = mapped_column(
-        Text,
-        nullable=True,
+        Text, nullable=True,
     )
-
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        default=utc_now,
+        DateTime(timezone=True), nullable=False, default=utc_now,
     )
 
 
 class ScanRun(Base):
-    """
-    Stores the results and execution history of each market scan.
-    This model does not execute or submit broker orders.
-    """
-
     __tablename__ = "scan_runs"
 
     __table_args__ = (
@@ -322,95 +227,54 @@ class ScanRun(Base):
         Index("ix_scan_runs_status", "status"),
     )
 
-    id: Mapped[uuid4] = mapped_column(
-        Uuid(as_uuid=True),
-        primary_key=True,
-        default=uuid4,
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4,
     )
-
     status: Mapped[str] = mapped_column(
-        String(20),
-        nullable=False,
-        default="RUNNING",
+        String(20), nullable=False, default="RUNNING",
     )
-
     mode: Mapped[str] = mapped_column(
-        String(30),
-        nullable=False,
-        default="day_trading",
+        String(30), nullable=False, default="day_trading",
     )
-
     symbols: Mapped[list] = mapped_column(
-        JSON,
-        nullable=False,
+        JSON, nullable=False,
     )
-
     timeframes: Mapped[list] = mapped_column(
-        JSON,
-        nullable=False,
+        JSON, nullable=False,
     )
-
     account_balance: Mapped[Decimal] = mapped_column(
-        Numeric(20, 8),
-        nullable=False,
-        default=Decimal("1000"),
+        Numeric(20, 8), nullable=False, default=Decimal("1000"),
     )
-
     risk_percent: Mapped[Decimal] = mapped_column(
-        Numeric(8, 4),
-        nullable=False,
-        default=Decimal("0.5"),
+        Numeric(8, 4), nullable=False, default=Decimal("0.5"),
     )
-
     risk_reward_ratio: Mapped[Decimal] = mapped_column(
-        Numeric(8, 4),
-        nullable=False,
-        default=Decimal("2"),
+        Numeric(8, 4), nullable=False, default=Decimal("2"),
     )
-
     minimum_score: Mapped[int] = mapped_column(
-        nullable=False,
-        default=60,
+        nullable=False, default=60,
     )
-
     markets_requested: Mapped[int] = mapped_column(
-        nullable=False,
-        default=0,
+        nullable=False, default=0,
     )
-
     markets_analyzed: Mapped[int] = mapped_column(
-        nullable=False,
-        default=0,
+        nullable=False, default=0,
     )
-
     opportunities_found: Mapped[int] = mapped_column(
-        nullable=False,
-        default=0,
+        nullable=False, default=0,
     )
-
     markets_failed: Mapped[int] = mapped_column(
-        nullable=False,
-        default=0,
+        nullable=False, default=0,
     )
-
     results: Mapped[dict] = mapped_column(
-        JSON,
-        nullable=False,
-        default=dict,
+        JSON, nullable=False, default=dict,
     )
-
     error_message: Mapped[str | None] = mapped_column(
-        Text,
-        nullable=True,
+        Text, nullable=True,
     )
-
     started_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        default=utc_now,
+        DateTime(timezone=True), nullable=False, default=utc_now,
     )
-
     completed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
+        DateTime(timezone=True), nullable=True,
     )
